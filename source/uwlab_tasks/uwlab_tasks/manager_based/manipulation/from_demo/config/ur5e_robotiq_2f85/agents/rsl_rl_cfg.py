@@ -39,6 +39,8 @@ class PPOWithContextRunnerCfg(RslRlOnPolicyRunnerCfg):
         embedding_dropout=0.1,
         attention_dropout=0.1,
         residual_dropout=0.1,
+        cross_attention_merge=True,
+        obs_token_count=4,
         max_num_episodes=1, # not actually implemented yet lol
         context_length_override=None, # i dont think this does anything either
         optimizer=TransformerOptimizerCfg(
@@ -48,6 +50,8 @@ class PPOWithContextRunnerCfg(RslRlOnPolicyRunnerCfg):
             eps=1.0e-8,
             max_grad_norm=1.0,
             optimizer_class="AdamW",
+            lr_warmup_steps=100,
+            lr_schedule="cosine_annealing_with_warmup",
         ),
     )
     algorithm = RslRlPpoAlgorithmCfg(

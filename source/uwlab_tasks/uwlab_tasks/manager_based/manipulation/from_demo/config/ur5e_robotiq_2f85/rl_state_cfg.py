@@ -278,10 +278,10 @@ class FromDemoTrainEventCfg:
     # random_pushes = EventTerm(
     #     func=mdp_events.push_by_setting_velocity,
     #     mode="interval",
-    #     interval_range_s=(1.0, 3.0),
+    #     interval_range_s=(2.0, 4.0),
     #     params={
     #         "asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
-    #         "velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)},
+    #         "velocity_range": {"x": (-0.4, 0.4), "y": (-0.4, 0.4)},
     #     },
     # )
 

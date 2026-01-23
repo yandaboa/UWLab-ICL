@@ -334,7 +334,7 @@ class ObservationsCfg:
                 "target_asset_cfg": SceneEntityCfg("receptive_object"),
                 "root_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
                 "rotation_repr": "axis_angle",
-                # "ood_offset": 1.0,
+                "ood_offset": 1.0,
             },
         )
 
@@ -344,7 +344,7 @@ class ObservationsCfg:
                 "target_asset_cfg": SceneEntityCfg("insertive_object"),
                 "root_asset_cfg": SceneEntityCfg("receptive_object"),
                 "rotation_repr": "axis_angle",
-                # "ood_offset": 1.0,
+                "ood_offset": 1.0,
             },
         )
 

@@ -87,6 +87,11 @@ class TransformerOptimizerCfg:
     optimizer_class: str = "AdamW"
     """The class name of the transformer optimizer."""
 
+    lr_warmup_steps: int = 0
+    """The number of warmup steps for the learning rate scheduler."""
+
+    lr_schedule: str | None = None
+    """The learning rate schedule function name."""
 @configclass
 class RslRlFancyTransformerHistoryActorCriticCfg(RslRlFancyActorCriticCfg):
     """Configuration for actor-critic networks with transformer history."""
@@ -117,6 +122,12 @@ class RslRlFancyTransformerHistoryActorCriticCfg(RslRlFancyActorCriticCfg):
     
     context_length_override: int | None = None
     """The context length override for the transformer history actor-critic."""
+
+    cross_attention_merge: bool = False
+    """Whether to merge obs and context via cross-attention."""
+
+    obs_token_count: int = 4
+    """The number of obs query tokens for cross-attention."""
 
     optimizer: TransformerOptimizerCfg = TransformerOptimizerCfg()
     """The optimizer for the transformer history actor-critic."""

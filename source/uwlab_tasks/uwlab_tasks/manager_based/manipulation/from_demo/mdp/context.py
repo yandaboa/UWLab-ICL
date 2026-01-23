@@ -55,7 +55,7 @@ def tracking_joint_angle_reward(
 
     angle_diff = torch.square(demo_joint_angles - cur_joint_angles).mean(dim=-1)
 
-    return -1 * angle_diff
+    return 5 - angle_diff
 
 
 def tracking_end_effector_reward(
@@ -87,7 +87,7 @@ def tracking_end_effector_reward(
     pos_err = torch.square(demo_ee_pos - curr_ee_pose).mean(dim=-1)  # meters
     # pos_norm = pos_err / pos_tol
 
-    return -1 * pos_err
+    return 5 - pos_err
     # return _huber_saturating(pos_norm, delta=huber_delta)
 
 def _get_tracking_context(env: ManagerBasedEnv) -> Any:

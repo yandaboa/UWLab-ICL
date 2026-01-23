@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import torch
+import torch.nn as nn
 from tensordict import TensorDict
 
 from rsl_rl.modules.actor_critic import ActorCritic
@@ -36,6 +37,8 @@ class LongContextActorCritic(ActorCritic):
         residual_dropout: float = 0.1,
         max_num_episodes: int = 1,
         context_length_override: int | None = None,
+        cross_attention_merge: bool = False,
+        obs_token_count: int = 4,
         optimizer: Optional[Any] = None,
         **kwargs: dict[str, Any],
     ) -> None:
@@ -78,6 +81,8 @@ class LongContextActorCritic(ActorCritic):
         self.context_encoder = None
         self.context_keys = context_keys or "context"
         self.transformer_optimizer_cfg = optimizer
+        self.cross_attention_merge = cross_attention_merge
+        self.obs_token_count = obs_token_count
 
         if self.context_keys and isinstance(self.context_keys, str) and self.context_keys in obs:
             self._ensure_context_encoder(obs)
@@ -144,13 +149,27 @@ class LongContextActorCritic(ActorCritic):
                 reward_dim=self.num_rewards,
                 **self.transformer_args,
             )
-            policy_input_size = num_actor_obs + self.context_encoder.hidden_dim
+            if self.cross_attention_merge:
+                if self.obs_token_count < 1:
+                    raise ValueError("obs_token_count must be at least 1.")
+                self.context_encoder.obs_query_proj = nn.Linear(
+                    num_actor_obs,
+                    self.context_encoder.hidden_dim * self.obs_token_count,
+                )
+                self.context_encoder.obs_cross_attn = nn.MultiheadAttention(
+                    self.context_encoder.hidden_dim,
+                    self.transformer_args["num_heads"],
+                    batch_first=True,
+                )
+                policy_input_size = self.context_encoder.hidden_dim
+            else:
+                policy_input_size = num_actor_obs + self.context_encoder.hidden_dim
             if self.state_dependent_std:
                 self.actor = MLP(policy_input_size, [2, num_actions], self.actor_hidden_dims, self.activation)
             else:
                 self.actor = MLP(policy_input_size, num_actions, self.actor_hidden_dims, self.activation)
             if self.actor_obs_normalization:
-                self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs + self.context_encoder.hidden_dim)
+                self.actor_obs_normalizer = EmpiricalNormalization(policy_input_size)
             else:
                 self.actor_obs_normalizer = torch.nn.Identity()
 
@@ -182,9 +201,26 @@ class LongContextActorCritic(ActorCritic):
         context_tensor: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Merge base observations with context for actor/critic."""
-        if context_tensor is None:
-            return obs_tensor
-        return torch.cat([obs_tensor, context_tensor], dim=-1)
+        if context_tensor is None or not self.cross_attention_merge:
+            if context_tensor is None:
+                return obs_tensor
+            return torch.cat([obs_tensor, context_tensor], dim=-1)
+        assert self.context_encoder is not None, "Context encoder not initialized"
+        if not hasattr(self.context_encoder, "obs_query_proj") or not hasattr(self.context_encoder, "obs_cross_attn"):
+            raise RuntimeError("Cross-attention modules not initialized on context encoder.")
+        query_tokens = self.context_encoder.obs_query_proj(obs_tensor).reshape(
+            obs_tensor.shape[0],
+            self.obs_token_count,
+            self.context_encoder.hidden_dim,
+        )
+        context_tokens = context_tensor.unsqueeze(1)
+        attn_out, _ = self.context_encoder.obs_cross_attn(
+            query=query_tokens,
+            key=context_tokens,
+            value=context_tokens,
+            need_weights=False,
+        )
+        return attn_out.mean(dim=1)
 
     def get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
         """Return policy observations augmented with context."""
