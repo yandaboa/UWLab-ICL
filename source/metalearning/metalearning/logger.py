@@ -153,7 +153,9 @@ class WandbEpisodeLogger:
         self._run = run
         self._episode_returns: list[float] = []
         self._episode_success: list[float] = []
+        self._episode_lengths: list[float] = []
         self._track_success = False
+        self._track_lengths = False
         if not enable:
             return
         if self._run is not None:
@@ -167,7 +169,13 @@ class WandbEpisodeLogger:
         project, run = self._resolve_names(agent_cfg, project_name, run_name)
         self._run = wandb.init(project=project, name=run, dir=log_dir, config={"task": task_name})
 
-    def log(self, episode_returns: Sequence[float], episode_success: Sequence[float] | None, step: int) -> None:
+    def log(
+        self,
+        episode_returns: Sequence[float],
+        episode_success: Sequence[float] | None,
+        step: int,
+        episode_lengths: Sequence[float] | None = None,
+    ) -> None:
         """Log episodic statistics when due."""
         if self._run is None:
             return
@@ -176,6 +184,9 @@ class WandbEpisodeLogger:
         if episode_success is not None:
             self._track_success = True
             self._episode_success.extend(float(value) for value in episode_success)
+        if episode_lengths is not None:
+            self._track_lengths = True
+            self._episode_lengths.extend(float(value) for value in episode_lengths)
         self._flush_batches(step)
 
     def flush(self, step: int) -> None:
@@ -201,6 +212,10 @@ class WandbEpisodeLogger:
             successes = self._episode_success[:batch_size]
             del self._episode_success[:batch_size]
             log_payload["episode/task_success_rate"] = float(np.mean(successes))
+        if self._track_lengths and len(self._episode_lengths) >= batch_size:
+            lengths = self._episode_lengths[:batch_size]
+            del self._episode_lengths[:batch_size]
+            log_payload["episode/avg_length"] = float(np.mean(lengths))
         run.log(log_payload, step=step)
 
     def _resolve_names(

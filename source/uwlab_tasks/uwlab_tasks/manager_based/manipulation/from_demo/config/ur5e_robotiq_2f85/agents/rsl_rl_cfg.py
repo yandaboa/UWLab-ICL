@@ -24,9 +24,10 @@ class PPOWithContextRunnerCfg(RslRlOnPolicyRunnerCfg):
     policy = RslRlFancyTransformerHistoryActorCriticCfg(
         class_name="LongContextActorCritic",
         init_noise_std=1.0,
-        actor_obs_normalization=True,
+        actor_obs_normalization=False,
         critic_obs_normalization=True,
-        actor_hidden_dims=[512, 256, 128, 64],
+        actor_hidden_dims=[128],
+        # actor_hidden_dims=[256, 128],
         critic_hidden_dims=[512, 256, 128, 64],
         activation="elu",
         noise_std_type="gsde",
@@ -36,11 +37,15 @@ class PPOWithContextRunnerCfg(RslRlOnPolicyRunnerCfg):
         hidden_dim=256,
         num_layers=2,
         num_heads=4,
-        embedding_dropout=0.1,
-        attention_dropout=0.1,
-        residual_dropout=0.1,
+        embedding_dropout=0.0,
+        attention_dropout=0.0,
+        residual_dropout=0.0,
+
+        # transformer_actor_only=False,
+        transformer_actor_only=True,
+
         cross_attention_merge=True,
-        obs_token_count=4,
+        obs_token_count=1,
         max_num_episodes=1, # not actually implemented yet lol
         context_length_override=None, # i dont think this does anything either
         optimizer=TransformerOptimizerCfg(
@@ -60,8 +65,8 @@ class PPOWithContextRunnerCfg(RslRlOnPolicyRunnerCfg):
         use_clipped_value_loss=True,
         normalize_advantage_per_mini_batch=False,
         clip_param=0.2,
-        entropy_coef=0.006,
-        num_learning_epochs=5,
+        entropy_coef=0.0001,
+        num_learning_epochs=2,
         num_mini_batches=4,
         learning_rate=1.0e-4,
         schedule="adaptive",

@@ -25,6 +25,8 @@ python -m torch.distributed.run \
     env.scene.insertive_object=rectangle \
     env.scene.receptive_object=wall
 
+if training won't start because the port is already taken, pass in --master_port 29501 before  scripts/reinforcement_learning/rsl_rl/train.py
+
 training experts:
 python -m torch.distributed.run \
     --nnodes 1 \
@@ -37,3 +39,6 @@ python -m torch.distributed.run \
     --distributed \
     env.scene.insertive_object=rectangle \
     env.scene.receptive_object=wall
+
+running evals to see how well something tracks a demo:
+python scripts/reinforcement_learning/rsl_rl/eval_demo_tracking.py --task OmniFromDemo-UR5eRobotiq2f85-Eval-v0 --num_rollouts 50 --num_envs 32 --checkpoint cube_tracking_transformer_actor.pt --headless

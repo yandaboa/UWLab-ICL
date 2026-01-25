@@ -10,6 +10,7 @@ from dataclasses import MISSING
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg, ViewerCfg
+from isaaclab.managers import CommandTermCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -292,6 +293,16 @@ class FromDemoTrainEventCfg:
     )
 
 @configclass
+class FromDemoEvalEventCfg:
+    """Evaling models to track a demo."""
+
+    resample_episode = EventTerm(
+        func=from_demo_mdp.resample_episode,
+        mode="reset",
+        params={},
+    )
+
+@configclass
 class EvalEventCfg(BaseEventCfg):
     """Configuration for evaluation events."""
 
@@ -318,7 +329,15 @@ class DemoCollectEventCfg(EvalEventCfg):
     )
 
 @configclass
-class CommandsCfg:
+class DemoTrackingMetricsCommandCfg(CommandTermCfg):
+    """Configuration for the demo tracking metrics command term."""
+
+    class_type: type = from_demo_mdp.DemoTrackingMetricsCommand
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    resampling_time_range: tuple[float, float] = (0.01, 0.01)
+
+@configclass
+class GoalCommandsCfg:
     """Command specifications for the MDP."""
 
     task_command = omni_reset_mdp.TaskCommandCfg(
@@ -329,6 +348,11 @@ class CommandsCfg:
         insertive_asset_cfg=SceneEntityCfg("insertive_object"),
         receptive_asset_cfg=SceneEntityCfg("receptive_object"),
     )
+@configclass
+class TrackingCommandsCfg:
+    """Command specifications for the tracking metrics command term."""
+
+    tracking_metrics_command = DemoTrackingMetricsCommandCfg()
 
 @configclass
 class CriticCfg(ObsGroup):
@@ -531,6 +555,11 @@ class DebugObservationsCfg(ObservationsCfg):
                 "rotation_repr": "axis_angle",
             },
         )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = False
+            self.history_length = 1
     
     debug: DebugCfg = DebugCfg()
 
@@ -547,6 +576,7 @@ class DataCollectObservationsCfg(DebugObservationsCfg):
 
         joint_vel = ObsTerm(func=omni_reset_mdp.joint_vel)
 
+        demo_link_quats = ObsTerm(func=from_demo_mdp.demo_link_quats)
 
         end_effector_pose = ObsTerm(
             func=omni_reset_mdp.target_asset_pose_in_root_asset_frame_with_metadata,
@@ -602,10 +632,10 @@ class TrainingObservationsCfg(DebugObservationsCfg):
     class TrackingCriticCfg(CriticCfg):
         """Observations for tracking critic group."""
         context_obs = ObsTerm(
-            func=from_demo_mdp.get_last_demo_obs,
+            func=from_demo_mdp.get_supervision_demo_obs,
         )
         context_actions = ObsTerm(
-            func=from_demo_mdp.get_last_demo_actions,
+            func=from_demo_mdp.get_supervision_demo_actions,
         )
         context_rewards = ObsTerm(
             func=from_demo_mdp.get_last_demo_rewards,
@@ -648,6 +678,49 @@ class TrainingObservationsCfg(DebugObservationsCfg):
         )
     
     critic: TrackingCriticCfg = TrackingCriticCfg()
+    context: ContextCfg = ContextCfg()
+    ee_pose: EndEffectorPoseCfg = EndEffectorPoseCfg()
+
+@configclass
+class EvalObservationsCfg(DebugObservationsCfg):
+    """Observations for evaluation."""
+
+    @configclass
+    class ContextCfg(ObsGroup):
+
+        context_obs = ObsTerm(
+            func=from_demo_mdp.get_demo_obs,
+        )
+        context_actions = ObsTerm(
+            func=from_demo_mdp.get_demo_actions,
+        )
+        context_rewards = ObsTerm(
+            func=from_demo_mdp.get_demo_rewards,
+        )
+        context_lengths = ObsTerm(
+            func=from_demo_mdp.get_demo_lengths,
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = False
+            self.history_length = 1
+    
+    @configclass
+    class EndEffectorPoseCfg(ObsGroup):
+        """Observations for end effector pose."""
+        
+        end_effector_pose = ObsTerm(
+            func=omni_reset_mdp.target_asset_pose_in_root_asset_frame_with_metadata,
+            params={
+                "target_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+                "target_asset_offset_metadata_key": "gripper_offset",
+                "root_asset_offset_metadata_key": "offset",
+                "rotation_repr": "axis_angle",
+            },
+        )
+
     context: ContextCfg = ContextCfg()
     ee_pose: EndEffectorPoseCfg = EndEffectorPoseCfg()
 
@@ -714,11 +787,10 @@ class FromDemoRewardsCfg:
     # task rewards
 
     tracking_joint_angle = RewTerm(
-        func=from_demo_mdp.tracking_joint_angle_reward,
-        weight=1.0,
+        func=from_demo_mdp.pose_quat_tracking_reward,
+        weight=20.0,
         params={
-            "joint_tol": 0.1,
-            "huber_delta": 1.0,
+            "k": 2.0,
         },
     )
 
@@ -726,27 +798,43 @@ class FromDemoRewardsCfg:
         func=from_demo_mdp.tracking_end_effector_reward,
         weight=1.0,
         params={
-            "pos_tol": 0.01,
-            "huber_delta": 1.0,
+            "k": 40.0,
         },
     )
+
+    # tracking_action = RewTerm(
+    #     func=from_demo_mdp.tracking_action_reward,
+    #     weight=1.0,
+    # )
 
 
 @configclass
 class DemoContextCfg:
     # episode_paths: str = "episodes/20260122_224145/episodes_000000.pt"
     episode_paths: list[str] = [
-        "episodes/20260122_233651/episodes_000000.pt",
-        "episodes/20260122_233651/episodes_000001.pt",
-        "episodes/20260122_233651/episodes_000002.pt",
-        "episodes/20260122_233651/episodes_000003.pt",
-        "episodes/20260122_233651/episodes_000004.pt",
-        "episodes/20260122_233651/episodes_000005.pt",
-        "episodes/20260122_233651/episodes_000006.pt",
-        "episodes/20260122_233651/episodes_000007.pt",
-        "episodes/20260122_233651/episodes_000008.pt",
-        "episodes/20260122_233651/episodes_000009.pt",
+        "episodes/20260123_190742/episodes_000000.pt",
+        "episodes/20260123_190742/episodes_000001.pt",
+        "episodes/20260123_190742/episodes_000002.pt",
+        "episodes/20260123_190742/episodes_000003.pt",
+        "episodes/20260123_190742/episodes_000004.pt",
+        "episodes/20260123_190742/episodes_000005.pt",
+        "episodes/20260123_190742/episodes_000006.pt",
+        "episodes/20260123_190742/episodes_000007.pt",
+        "episodes/20260123_190742/episodes_000008.pt",
+        "episodes/20260123_190742/episodes_000009.pt",
     ]
+    # episode_paths: list[str] = [
+    #     "episodes/20260122_233651/episodes_000000.pt",
+    #     "episodes/20260122_233651/episodes_000001.pt",
+    #     "episodes/20260122_233651/episodes_000002.pt",
+    #     "episodes/20260122_233651/episodes_000003.pt",
+    #     "episodes/20260122_233651/episodes_000004.pt",
+    #     "episodes/20260122_233651/episodes_000005.pt",
+    #     "episodes/20260122_233651/episodes_000006.pt",
+    #     "episodes/20260122_233651/episodes_000007.pt",
+    #     "episodes/20260122_233651/episodes_000008.pt",
+    #     "episodes/20260122_233651/episodes_000009.pt",
+    # ]
     state_noise_scale: float = 0.0
     download_dir: str | None = None
 
@@ -837,7 +925,7 @@ class Ur5eRobotiq2f85RlStateCfg(ManagerBasedRLEnvCfg):
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: BaseEventCfg = MISSING
-    commands: CommandsCfg = CommandsCfg()
+    commands: GoalCommandsCfg = GoalCommandsCfg()
     viewer: ViewerCfg = ViewerCfg(eye=(2.0, 0.0, 0.75), origin_type="world", env_index=0, asset_name="robot")
     variants = variants
 
@@ -972,6 +1060,7 @@ class Ur5eRobotiq2f85RelJointPosDemoCollectCfg(Ur5eRobotiq2f85RlStateCfg):
     actions: Ur5eRobotiq2f85RelativeOSCAction = Ur5eRobotiq2f85RelativeOSCAction()
     terminations: FromDemoCollectTerminationsCfg = FromDemoCollectTerminationsCfg()
     observations: DataCollectObservationsCfg = DataCollectObservationsCfg()
+    commands: GoalCommandsCfg = GoalCommandsCfg()
 
     def __post_init__(self):
         super().__post_init__()
@@ -998,6 +1087,34 @@ class Ur5eRobotiq2f85RelJointPosFromDemoTrainCfg(Ur5eRobotiq2f85RlStateCfg):
     rewards: FromDemoRewardsCfg = FromDemoRewardsCfg()
     observations: TrainingObservationsCfg = TrainingObservationsCfg()
     context: DemoContextCfg = DemoContextCfg()
+    commands: TrackingCommandsCfg = TrackingCommandsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.robot = EXPLICIT_UR5E_ROBOTIQ_2F85.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+        # self.events.randomize_robot_actuator_parameters = EventTerm(
+        #     func=omni_reset_mdp.randomize_operational_space_controller_gains,
+        #     mode="reset",
+        #     params={
+        #         "action_name": "arm",
+        #         "stiffness_distribution_params": (0.7, 1.3),
+        #         "damping_distribution_params": (0.9, 1.1),
+        #         "operation": "scale",
+        #         "distribution": "uniform",
+        #     },
+        # )
+
+@configclass
+class Ur5eRobotiq2f85RelJointPosFromDemoEvalCfg(Ur5eRobotiq2f85RlStateCfg):
+    """Demo collection configuration for Relative Joint Position action space."""
+
+    events: FromDemoEvalEventCfg = FromDemoEvalEventCfg()
+    actions: Ur5eRobotiq2f85RelativeOSCAction = Ur5eRobotiq2f85RelativeOSCAction()
+    rewards: FromDemoRewardsCfg = FromDemoRewardsCfg()
+    observations: TrainingObservationsCfg = TrainingObservationsCfg()
+    context: DemoContextCfg = DemoContextCfg()
+    commands: TrackingCommandsCfg = TrackingCommandsCfg()
 
     def __post_init__(self):
         super().__post_init__()

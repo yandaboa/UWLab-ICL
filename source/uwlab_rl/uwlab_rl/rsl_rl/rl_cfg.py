@@ -129,6 +129,9 @@ class RslRlFancyTransformerHistoryActorCriticCfg(RslRlFancyActorCriticCfg):
     obs_token_count: int = 4
     """The number of obs query tokens for cross-attention."""
 
+    transformer_actor_only: bool = False
+    """Whether to use a transformer-only policy actor."""
+
     optimizer: TransformerOptimizerCfg = TransformerOptimizerCfg()
     """The optimizer for the transformer history actor-critic."""
 @configclass

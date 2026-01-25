@@ -199,7 +199,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     agent_cfg_dict = agent_cfg.to_dict()
-    agent_cfg_dict["algorithm"]["num_learning_iterations"] = agent_cfg.max_iterations
+    if agent_cfg_dict["algorithm"]["class_name"] == "PPOWithLongContext":
+        agent_cfg_dict["algorithm"]["num_learning_iterations"] = agent_cfg.max_iterations
     # create runner from rsl-rl
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, agent_cfg_dict, log_dir=log_dir, device=agent_cfg.device)

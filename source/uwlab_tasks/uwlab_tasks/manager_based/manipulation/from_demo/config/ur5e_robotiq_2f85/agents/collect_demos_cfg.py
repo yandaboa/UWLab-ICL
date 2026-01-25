@@ -53,6 +53,6 @@ class CollectDemosPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
         min_noise_frequency = 0.0,
         mean_noise_magnitude = 0.0,
         std_noise_magnitude = 4.0,
-        min_noise_magnitude = 8.0,
-        max_noise_magnitude = 16.0,
+        min_noise_magnitude = 4.0,
+        max_noise_magnitude = 8.0,
     )

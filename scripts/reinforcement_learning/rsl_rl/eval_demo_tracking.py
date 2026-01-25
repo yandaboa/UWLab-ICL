@@ -23,9 +23,10 @@ parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-
-parser.add_argument("--num_demos", type=int, default=100, help="Number of demos to collect.")
-parser.add_argument("--max_demos_before_saving", type=int, default=100, help="Maximum number of demos before saving the dataset.")
+parser.add_argument("--num_rollouts", type=int, default=50, help="Number of rollout pairs to save.")
+parser.add_argument(
+    "--max_rollouts_before_saving", type=int, default=50, help="Maximum rollout pairs before saving."
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -59,11 +60,20 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import os
 import time
-from typing import Mapping, cast
+from datetime import datetime
+from typing import Any, Mapping, cast
+
 import torch
-from tqdm import tqdm
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
+from uwlab_rl.rsl_rl.transformer_ppo import PPOWithLongContext
+from uwlab_rl.rsl_rl.long_context_ac import LongContextActorCritic
+
+import importlib
+runner_mod = importlib.import_module("rsl_rl.runners.on_policy_runner")
+runner_mod.LongContextActorCritic = LongContextActorCritic # type: ignore
+runner_mod.PPOWithLongContext = PPOWithLongContext # type: ignore
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -84,22 +94,10 @@ import uwlab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from uwlab_tasks.utils.hydra import hydra_task_config
 from uwlab_tasks.manager_based.manipulation.from_demo.mdp import utils as from_demo_utils
-from metalearning.data.environment_noise import EnvironmentNoise
-from metalearning.episode_storage import EpisodeStorage
-from metalearning.logger import WandbEpisodeLogger, WandbNoiseLogger
+from metalearning.rollout_pair_storage import RolloutPairStorage, demo_to_episode, rollout_to_episode
 from metalearning.rollout_storage import RolloutStorage
-from metalearning.state_storage import StateStorage
-
-from datetime import datetime
 
 # PLACEHOLDER: Extension template (do not remove this comment)
-
-def _flatten_debug_obs(debug_obs: object) -> dict[str, torch.Tensor]:
-    if isinstance(debug_obs, Mapping):
-        return {f"debug/{key}": value for key, value in debug_obs.items()}
-    if isinstance(debug_obs, torch.Tensor):
-        return {"debug": debug_obs}
-    return {}
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -143,14 +141,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
-    
-    # for logging, video, etc.
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    rollout_dir = os.path.join(log_dir, "rollouts", "demo_tracking", timestamp)
+    rollout_pair_storage = RolloutPairStorage(args_cli.max_rollouts_before_saving, rollout_dir)
 
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", "collect_demos", timestamp),
+            "video_folder": os.path.join(log_dir, "videos", "play", timestamp),
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
@@ -159,47 +158,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
-    environment_noise = None
-    noise_cfg = None
-    if isinstance(agent_cfg, dict):
-        noise_cfg = agent_cfg.get("noise")
-    else:
-        noise_cfg = getattr(agent_cfg, "noise", None)
-    if noise_cfg is not None:
-        if hasattr(noise_cfg, "to_dict"):
-            noise_cfg = noise_cfg.to_dict()
-        environment_noise = EnvironmentNoise(noise_cfg, num_envs=env.unwrapped.num_envs, device=env.unwrapped.device)
-        env.unwrapped.environment_noise = environment_noise
-
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    logger_choice = args_cli.logger or getattr(agent_cfg, "logger", None)
-    noise_logger = WandbNoiseLogger(
-        enable=logger_choice == "wandb",
-        agent_cfg=agent_cfg,
-        log_dir=log_dir,
-        task_name=args_cli.task,
-        log_interval=100,
-        project_name=args_cli.log_project_name,
-    )
-    episode_logger = WandbEpisodeLogger(
-        enable=logger_choice == "wandb",
-        agent_cfg=agent_cfg,
-        log_dir=log_dir,
-        task_name=args_cli.task,
-        log_interval=100,
-        project_name=args_cli.log_project_name,
-        run=noise_logger.run,
-        wandb_module=noise_logger.wandb,
-    )
-
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+    agent_cfg_dict = agent_cfg.to_dict()
+    if agent_cfg_dict["algorithm"]["class_name"] == "PPOWithLongContext":
+        agent_cfg_dict["algorithm"]["num_learning_iterations"] = agent_cfg.max_iterations
     # load previously trained model
     if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        runner = OnPolicyRunner(env, agent_cfg_dict, log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        runner = DistillationRunner(env, agent_cfg_dict, log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     runner.load(resume_path)
@@ -233,14 +203,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # reset environment
     previous_obs = env.get_observations()
-    # previous_obs, _ = env.reset() I think env creation implicitly resets it?
     obs_buf = env.unwrapped.obs_buf
     demo_obs = obs_buf["demo"]
-    debug_obs = obs_buf.get("debug") if isinstance(obs_buf, dict) else None
+    debug_obs = obs_buf["debug"]
     obs_shape = from_demo_utils.extract_obs_shape(demo_obs, debug_obs)
-    max_steps = getattr(env.unwrapped, "max_episode_length", args_cli.video_length)
     action_space = getattr(env.unwrapped, "single_action_space", env.action_space)
     action_shape = from_demo_utils.extract_action_shape(action_space)
+    max_steps = getattr(env.unwrapped, "max_episode_length", args_cli.video_length)
     rollout_storage = RolloutStorage(
         num_envs=env.unwrapped.num_envs,
         max_steps=max_steps,
@@ -248,19 +217,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         action_shape=action_shape,
         device=env.unwrapped.device,
     )
-    episode_storage = EpisodeStorage(
-        max_num_episodes=args_cli.max_demos_before_saving,
-        save_dir=os.path.join(log_dir, "episodes", timestamp),
-    )
-    progress_bar = tqdm(total=args_cli.num_demos, desc="Demos collected", unit="demos")
     manager_env = cast(ManagerBasedEnv, env.unwrapped)
-    state_storage = StateStorage(manager_env)
-    state_storage.capture(torch.arange(manager_env.num_envs, device=manager_env.device))
-    success_term_name = from_demo_utils.find_success_term_name(manager_env)
-    last_episode_count = 0
+    demo_context = getattr(manager_env, "context", None)
+    if demo_context is None:
+        raise RuntimeError("FromDemoEval requires a demo context on the environment.")
+    demo_indices = demo_context.episode_indices.clone()
     timestep = 0
-    global_step = 0
-    all_demos_collected = False
+    rollouts_collected = 0
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -268,14 +231,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         with torch.inference_mode():
             # agent stepping
             actions = policy(previous_obs)
-            if environment_noise is not None:
-                actions = environment_noise.step_action(actions)
             # env stepping
-            obs, rewards, dones, extras = env.step(actions)
+            obs, rewards, dones, _ = env.step(actions)
             demo_obs = previous_obs["demo"]
             debug_obs = previous_obs.get("debug") if isinstance(previous_obs, dict) else None
-            debug_flat = _flatten_debug_obs(debug_obs)
-            if isinstance(demo_obs, dict):
+            debug_flat = {}
+            if isinstance(debug_obs, Mapping):
+                debug_flat = {f"debug/{key}": value for key, value in debug_obs.items()}
+            elif isinstance(debug_obs, torch.Tensor):
+                debug_flat = {"debug": debug_obs}
+            if isinstance(demo_obs, Mapping):
                 rollout_obs = {**demo_obs, **debug_flat} if debug_flat else demo_obs
             elif debug_flat:
                 rollout_obs = {"demo": demo_obs, **debug_flat}
@@ -288,33 +253,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if torch.any(done_mask):
                 done_env_ids = torch.nonzero(done_mask, as_tuple=True)[0]
                 rollouts = rollout_storage.get_rollouts(done_env_ids)
-                states, physics = state_storage.fetch(done_env_ids)
-                rollouts["states"] = states
-                rollouts["physics"] = physics
-                episode_storage.add_episode(rollouts, env_ids=done_env_ids)
-                episode_returns, episode_success = from_demo_utils.collect_episode_metrics(
-                    rollouts, done_env_ids, manager_env, success_term_name
-                )
-                episode_lengths = rollouts["lengths"].detach().cpu().tolist()
-                episode_logger.log(episode_returns, episode_success, global_step, episode_lengths=episode_lengths)
-                new_episode_count = episode_storage.total_episodes
-                if new_episode_count > last_episode_count:
-                    remaining = args_cli.num_demos - progress_bar.n
-                    progress_bar.update(min(new_episode_count - last_episode_count, max(0, remaining)))
-                    last_episode_count = new_episode_count
+                pairs: list[dict[str, Any]] = []
+                done_env_list = done_env_ids.detach().cpu().tolist()
+                for rollout_idx, env_id in enumerate(done_env_list):
+                    rollout_episode = rollout_to_episode(rollouts, rollout_idx, env_id)
+                    demo_index = int(demo_indices[env_id].item())
+                    demo_episode = demo_to_episode(demo_context, demo_index, env_id)
+                    pairs.append({"demo": demo_episode, "rollout": rollout_episode})
+                rollout_pair_storage.add_pairs(pairs)
+                rollouts_collected += len(pairs)
                 rollout_storage.wipe_envs(done_env_ids)
-                state_storage.capture(done_env_ids)
-                if episode_storage.saved_episodes >= args_cli.num_demos:
-                    all_demos_collected = True
-                elif episode_storage.total_episodes >= args_cli.num_demos:
-                    episode_storage.force_save()
-                    all_demos_collected = True
+                demo_indices[done_env_ids] = demo_context.episode_indices[done_env_ids]
             previous_obs = obs
-        if environment_noise is not None:
-            noise_logger.log(environment_noise, global_step)
-        global_step += 1
-
-        if all_demos_collected:
+        if args_cli.video:
+            timestep += 1
+            # Exit the play loop after recording one video
+            if timestep == args_cli.video_length:
+                break
+        if rollouts_collected >= args_cli.num_rollouts:
             break
 
         # time delay for real-time evaluation
@@ -323,10 +279,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             time.sleep(sleep_time)
 
     # close the simulator
-    progress_bar.close()
+    rollout_pair_storage.force_save()
     env.close()
-    episode_logger.flush(global_step)
-    noise_logger.finish()
 
 
 if __name__ == "__main__":

@@ -120,16 +120,21 @@ def collect_episode_metrics(
 
 
 def extract_obs_shape(
-    demo_obs: torch.Tensor | Mapping[str, torch.Tensor], debug_obs: torch.Tensor | None
+    demo_obs: torch.Tensor | Mapping[str, torch.Tensor],
+    debug_obs: torch.Tensor | Mapping[str, torch.Tensor] | None,
 ) -> tuple[int, ...] | dict[str, tuple[int, ...]]:
+    debug_shapes: dict[str, tuple[int, ...]] = {}
+    if isinstance(debug_obs, Mapping):
+        debug_shapes = {f"debug/{key}": value.shape[1:] for key, value in debug_obs.items()}
+    elif isinstance(debug_obs, torch.Tensor):
+        debug_shapes = {"debug": debug_obs.shape[1:]}
     if isinstance(demo_obs, Mapping):
         obs_shape = {key: value.shape[1:] for key, value in demo_obs.items()}
-        if debug_obs is not None:
-            obs_shape["debug"] = debug_obs.shape[1:]
+        obs_shape.update(debug_shapes)
         return obs_shape
-    if debug_obs is None:
+    if not debug_shapes:
         return demo_obs.shape[1:]
-    return {"demo": demo_obs.shape[1:], "debug": debug_obs.shape[1:]}
+    return {"demo": demo_obs.shape[1:], **debug_shapes}
 
 
 def extract_action_shape(action_space: Any) -> tuple[int, ...]:

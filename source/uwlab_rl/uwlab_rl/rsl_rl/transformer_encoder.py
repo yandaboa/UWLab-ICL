@@ -5,6 +5,7 @@ import math
 
 import torch
 import torch.nn as nn
+from rsl_rl.networks.mlp import MLP
 
 
 class PositionalEncoding(nn.Module):
@@ -60,8 +61,9 @@ class TransformerBlock(nn.Module):
         padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Apply attention and feedforward updates."""
-        attn_mask = None
+        attn_mask = torch.jit.annotate(Optional[torch.Tensor], None)
         if self.causal:
+            assert self.causal_mask is not None
             attn_mask = self.causal_mask[: x.shape[1], : x.shape[1]]
         norm_x = self.norm1(x)
         attention_out, _ = self.attention(
@@ -98,7 +100,7 @@ class TransformerEncoder(nn.Module):
             embedding_dim = hidden_dim
         self.input_proj = nn.Linear(input_dim, embedding_dim)
         self.pos_emb = PositionalEncoding(hidden_dim=embedding_dim, max_len=max_len)
-        self.embed_proj = None
+        self.embed_proj = torch.jit.annotate(Optional[nn.Linear], None)
         if embedding_dim != hidden_dim:
             self.embed_proj = nn.Linear(embedding_dim, hidden_dim)
         
@@ -206,3 +208,82 @@ class EpisodeEncoder(TransformerEncoder):
         if batch_shape:
             x = x.reshape(*batch_shape, seq_len, x.shape[-1])
         return x
+
+
+class TransformerActor(nn.Module):
+    """Transformer actor that maps token sequences to action means."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        num_actions: int,
+        actor_hidden_dims: tuple[int] | list[int],
+        embedding_dim: Optional[int] = None,
+        hidden_dim: int = 256,
+        num_layers: int = 4,
+        num_heads: int = 4,
+        max_len: int = 180,
+        attention_dropout: float = 0.1,
+        residual_dropout: float = 0.0,
+        embedding_dropout: float = 0.1,
+        causal: bool = True,
+    ) -> None:
+        super().__init__()
+        self.encoder = TransformerEncoder(
+            input_dim=input_dim,
+            embedding_dim=embedding_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            max_len=max_len,
+            attention_dropout=attention_dropout,
+            residual_dropout=residual_dropout,
+            embedding_dropout=embedding_dropout,
+            causal=causal,
+        )
+        self.action_head = MLP(hidden_dim, num_actions, actor_hidden_dims, "gelu")
+        self.register_buffer("_last_hidden", torch.empty(0), persistent=False)
+        self.register_buffer("_last_features", torch.empty(0), persistent=False)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        token_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Return action means for selected tokens."""
+        hidden = self.encoder(x, padding_mask=padding_mask)
+        hidden = self._select_tokens(hidden, token_indices)
+        self._last_hidden = hidden
+        self._last_features = self.action_head[:-1](hidden)
+        return self.action_head[-1](self._last_features)
+
+    def get_last_hidden_features(
+        self,
+        x: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        token_indices: Optional[torch.Tensor] = None,
+        use_cached: bool = False,
+    ) -> torch.Tensor:
+        """Return action head features before the final linear layer."""
+        if use_cached and self._last_features.numel() > 0:
+            features = self._last_features
+        else:
+            hidden = self.encoder(x, padding_mask=padding_mask)
+            hidden = self._select_tokens(hidden, token_indices)
+            self._last_hidden = hidden
+            features = self.action_head[:-1](hidden)
+            self._last_features = features
+        return features
+
+    @staticmethod
+    def _select_tokens(
+        hidden: torch.Tensor,
+        token_indices: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if token_indices is None:
+            return hidden[:, -1, :]
+        token_indices = token_indices.to(dtype=torch.long)
+        batch_indices = torch.arange(hidden.shape[0], device=hidden.device)
+        # Select per-batch token positions (advanced indexing).
+        return hidden[batch_indices, token_indices, :]

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import torch
 import torch.nn as nn
+from torch.distributions import Normal
 from tensordict import TensorDict
 
-from rsl_rl.modules.actor_critic import ActorCritic
-from .transformer_encoder import EpisodeEncoder
+from rsl_rl.modules.actor_critic import ActorCritic, GSDENoiseDistribution
+from .transformer_encoder import EpisodeEncoder, TransformerActor
 from rsl_rl.networks.normalization import EmpiricalNormalization
 from rsl_rl.networks.mlp import MLP
 
@@ -39,6 +40,7 @@ class LongContextActorCritic(ActorCritic):
         context_length_override: int | None = None,
         cross_attention_merge: bool = False,
         obs_token_count: int = 4,
+        transformer_actor_only: bool = False,
         optimizer: Optional[Any] = None,
         **kwargs: dict[str, Any],
     ) -> None:
@@ -83,9 +85,17 @@ class LongContextActorCritic(ActorCritic):
         self.transformer_optimizer_cfg = optimizer
         self.cross_attention_merge = cross_attention_merge
         self.obs_token_count = obs_token_count
+        self.transformer_actor_only = transformer_actor_only
+        self.context_length_override = context_length_override
+        self._cached_padding_mask: Optional[torch.Tensor] = None
+        self._cached_token_indices: Optional[torch.Tensor] = None
+        self.context_token_proj: Optional[nn.Linear] = None
+        self.current_obs_proj: Optional[nn.Linear] = None
+        self.token_embed_dim: Optional[int] = None
+        self.current_obs_dim: Optional[int] = None
 
         if self.context_keys and isinstance(self.context_keys, str) and self.context_keys in obs:
-            self._ensure_context_encoder(obs)
+            self._initialize_transformer(obs)
 
     """ 
     This function can be called with obs[self.context_keys] as a TensorDict or as a concatenated tensor 
@@ -125,53 +135,89 @@ class LongContextActorCritic(ActorCritic):
         
         demo_lengths = demo_lengths.to(dtype=torch.int32)
         return demo_obs, demo_actions, demo_rewards, demo_lengths
+
+    def _resolve_context_lengths(self, demo_lengths: torch.Tensor) -> tuple[torch.Tensor, int]:
+        lengths = demo_lengths.to(dtype=torch.long).squeeze(-1)
+        max_context_length = int(lengths.max().item())
+        if self.context_length_override is not None:
+            max_context_length = min(max_context_length, self.context_length_override)
+            lengths = torch.clamp(lengths, max=max_context_length)
+        return lengths, max_context_length
     
-    def _ensure_context_encoder(self, obs: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _initialize_transformer(self, obs: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         demo_obs, demo_actions, demo_rewards, demo_lengths = self._process_context_obs(obs)
 
-        max_length = int(demo_lengths.max().item())
-        num_envs = demo_obs.shape[0]
         
         self.num_obs = demo_obs.shape[-1]
         num_actions = demo_actions.shape[-1]
         assert num_actions == self.num_actions, "Number of actions must match, or you've shifted action spaces??"
         self.num_rewards = demo_rewards.shape[-1]
+        _, max_context_length = self._resolve_context_lengths(demo_lengths)
 
         if self.context_encoder is None:
             num_actor_obs = 0
             for obs_group in self.obs_groups["policy"]:
                 assert len(obs[obs_group].shape) == 2, "The ActorCritic module only supports 1D observations."
                 num_actor_obs += obs[obs_group].shape[-1]
-
-            self.context_encoder = EpisodeEncoder(
-                state_dim=self.num_obs,
-                action_dim=self.num_actions,
-                reward_dim=self.num_rewards,
-                **self.transformer_args,
-            )
-            if self.cross_attention_merge:
-                if self.obs_token_count < 1:
-                    raise ValueError("obs_token_count must be at least 1.")
-                self.context_encoder.obs_query_proj = nn.Linear(
-                    num_actor_obs,
-                    self.context_encoder.hidden_dim * self.obs_token_count,
+            self.current_obs_dim = num_actor_obs
+            if self.transformer_actor_only:
+                if self.state_dependent_std:
+                    raise ValueError("state_dependent_std is not supported with transformer_actor_only.")
+                token_input_dim = self.num_obs + self.num_actions + self.num_rewards
+                token_embed_dim = int(self.transformer_args["embedding_dim"])
+                self.token_embed_dim = token_embed_dim
+                self.context_token_proj = nn.Linear(token_input_dim, token_embed_dim)
+                self.current_obs_proj = nn.Linear(num_actor_obs, token_embed_dim)
+                max_token_length = max_context_length + 1
+                self.actor = TransformerActor(
+                    input_dim=token_embed_dim,
+                    num_actions=num_actions,
+                    actor_hidden_dims=self.actor_hidden_dims,
+                    embedding_dim=token_embed_dim,
+                    hidden_dim=self.transformer_args["hidden_dim"],
+                    num_layers=self.transformer_args["num_layers"],
+                    num_heads=self.transformer_args["num_heads"],
+                    max_len=max_token_length,
+                    attention_dropout=self.transformer_args["attention_dropout"],
+                    residual_dropout=self.transformer_args["residual_dropout"],
+                    embedding_dropout=self.transformer_args["embedding_dropout"],
+                    causal=True,
                 )
-                self.context_encoder.obs_cross_attn = nn.MultiheadAttention(
-                    self.context_encoder.hidden_dim,
-                    self.transformer_args["num_heads"],
-                    batch_first=True,
+                self.context_encoder = self.actor.encoder
+                if self.actor_obs_normalization:
+                    self.actor_obs_normalizer = EmpiricalNormalization(token_embed_dim)
+                else:
+                    self.actor_obs_normalizer = torch.nn.Identity()
+            else:
+                self.context_encoder = EpisodeEncoder(
+                    state_dim=self.num_obs,
+                    action_dim=self.num_actions,
+                    reward_dim=self.num_rewards,
+                    **self.transformer_args,
                 )
-                policy_input_size = self.context_encoder.hidden_dim
-            else:
-                policy_input_size = num_actor_obs + self.context_encoder.hidden_dim
-            if self.state_dependent_std:
-                self.actor = MLP(policy_input_size, [2, num_actions], self.actor_hidden_dims, self.activation)
-            else:
-                self.actor = MLP(policy_input_size, num_actions, self.actor_hidden_dims, self.activation)
-            if self.actor_obs_normalization:
-                self.actor_obs_normalizer = EmpiricalNormalization(policy_input_size)
-            else:
-                self.actor_obs_normalizer = torch.nn.Identity()
+                if self.cross_attention_merge:
+                    if self.obs_token_count < 1:
+                        raise ValueError("obs_token_count must be at least 1.")
+                    self.context_encoder.obs_query_proj = nn.Linear(
+                        num_actor_obs,
+                        self.context_encoder.hidden_dim * self.obs_token_count,
+                    )
+                    self.context_encoder.obs_cross_attn = nn.MultiheadAttention(
+                        self.context_encoder.hidden_dim,
+                        self.transformer_args["num_heads"],
+                        batch_first=True,
+                    )
+                    policy_input_size = self.context_encoder.hidden_dim
+                else:
+                    policy_input_size = num_actor_obs + self.context_encoder.hidden_dim
+                if self.state_dependent_std:
+                    self.actor = MLP(policy_input_size, [2, num_actions], self.actor_hidden_dims, self.activation)
+                else:
+                    self.actor = MLP(policy_input_size, num_actions, self.actor_hidden_dims, self.activation)
+                if self.actor_obs_normalization:
+                    self.actor_obs_normalizer = EmpiricalNormalization(policy_input_size)
+                else:
+                    self.actor_obs_normalizer = torch.nn.Identity()
 
             # set up buffers to cache output of transformer hidden states
             # self.hidden_states_cache = torch.zeros(num_envs, max_length, self.context_encoder.hidden_dim)
@@ -180,9 +226,11 @@ class LongContextActorCritic(ActorCritic):
 
     def get_context_obs(self, obs: TensorDict) -> Optional[torch.Tensor]:
         """Return the context observation tensor to append to base inputs."""
+        if self.transformer_actor_only:
+            return None
         if not self.context_keys:
             return None
-        demo_obs, demo_actions, demo_rewards, demo_lengths = self._ensure_context_encoder(obs)
+        demo_obs, demo_actions, demo_rewards, demo_lengths = self._initialize_transformer(obs)
         assert self.context_encoder is not None, "Context encoder not initialized"
         hidden_states = self.context_encoder(demo_obs, demo_actions, demo_rewards)
         assert hidden_states.shape[0] == demo_obs.shape[0], "Number of environments must match"
@@ -208,13 +256,15 @@ class LongContextActorCritic(ActorCritic):
         assert self.context_encoder is not None, "Context encoder not initialized"
         if not hasattr(self.context_encoder, "obs_query_proj") or not hasattr(self.context_encoder, "obs_cross_attn"):
             raise RuntimeError("Cross-attention modules not initialized on context encoder.")
-        query_tokens = self.context_encoder.obs_query_proj(obs_tensor).reshape(
+        obs_query_proj = cast(nn.Linear, self.context_encoder.obs_query_proj)
+        obs_cross_attn = cast(nn.MultiheadAttention, self.context_encoder.obs_cross_attn)
+        query_tokens = obs_query_proj(obs_tensor).reshape(
             obs_tensor.shape[0],
             self.obs_token_count,
             self.context_encoder.hidden_dim,
         )
         context_tokens = context_tensor.unsqueeze(1)
-        attn_out, _ = self.context_encoder.obs_cross_attn(
+        attn_out, _ = obs_cross_attn(
             query=query_tokens,
             key=context_tokens,
             value=context_tokens,
@@ -225,8 +275,13 @@ class LongContextActorCritic(ActorCritic):
     def get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
         """Return policy observations augmented with context."""
         base_obs = super().get_actor_obs(obs)
-        context_obs = self.get_context_obs(obs)
-        return self._merge_obs_with_context(base_obs, context_obs)
+        if not self.transformer_actor_only:
+            context_obs = self.get_context_obs(obs)
+            return self._merge_obs_with_context(base_obs, context_obs)
+        tokens, padding_mask, token_indices = self._build_transformer_tokens(obs, base_obs)
+        self._cached_padding_mask = padding_mask
+        self._cached_token_indices = token_indices
+        return tokens
 
     def get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
         """Return critic observations augmented with context."""
@@ -236,13 +291,20 @@ class LongContextActorCritic(ActorCritic):
     def act(self, obs: TensorDict, **kwargs: dict[str, Any]) -> torch.Tensor:
         """Sample actions from the policy with context-aware inputs."""
         obs_tensor = self.get_actor_obs(obs)
-        obs_tensor = self.actor_obs_normalizer(obs_tensor)
+        if self.transformer_actor_only:
+            obs_tensor = self._normalize_transformer_tokens(obs_tensor)
+        else:
+            obs_tensor = self.actor_obs_normalizer(obs_tensor)
         self._update_distribution(obs_tensor)
         return self.distribution.sample()
 
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
         """Return deterministic actions with context-aware inputs."""
         obs_tensor = self.get_actor_obs(obs)
+        if self.transformer_actor_only:
+            obs_tensor = self._normalize_transformer_tokens(obs_tensor)
+            self._update_distribution(obs_tensor)
+            return self.distribution.mean
         obs_tensor = self.actor_obs_normalizer(obs_tensor)
         if self.state_dependent_std:
             return self.actor(obs_tensor)[..., 0, :]
@@ -253,3 +315,94 @@ class LongContextActorCritic(ActorCritic):
         obs_tensor = self.get_critic_obs(obs)
         obs_tensor = self.critic_obs_normalizer(obs_tensor)
         return self.critic(obs_tensor)
+
+    def _build_transformer_tokens(
+        self,
+        obs: TensorDict,
+        current_obs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        demo_obs, demo_actions, demo_rewards, demo_lengths = self._initialize_transformer(obs)
+        context_lengths, max_context_length = self._resolve_context_lengths(demo_lengths)
+        if self.current_obs_dim is None or current_obs.shape[-1] != self.current_obs_dim:
+            raise ValueError("Current observation dim must match policy obs dim.")
+        if self.context_token_proj is None or self.current_obs_proj is None or self.token_embed_dim is None:
+            raise RuntimeError("Transformer projections are not initialized.")
+        context_tokens = torch.cat([demo_obs, demo_actions, demo_rewards], dim=-1)
+        context_tokens = self.context_token_proj(context_tokens)
+        context_tokens = context_tokens[:, :max_context_length, :]
+        num_envs = context_tokens.shape[0]
+        token_dim = context_tokens.shape[-1]
+        max_token_length = max_context_length + 1
+        tokens = torch.zeros(
+            (num_envs, max_token_length, token_dim),
+            device=context_tokens.device,
+            dtype=context_tokens.dtype,
+        )
+        tokens[:, :max_context_length, :] = context_tokens
+        current_token = self.current_obs_proj(current_obs)
+        batch_indices = torch.arange(num_envs, device=context_tokens.device)
+        # Insert current step token at the per-env index (advanced indexing).
+        tokens[batch_indices, context_lengths, :] = current_token
+        positions = torch.arange(max_token_length, device=context_tokens.device).unsqueeze(0)
+        padding_mask = positions > context_lengths.unsqueeze(1)
+        return tokens, padding_mask, context_lengths
+
+    def _normalize_transformer_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        if not self.actor_obs_normalization:
+            return tokens
+        flat_tokens = tokens.reshape(-1, tokens.shape[-1])
+        flat_tokens = self.actor_obs_normalizer(flat_tokens)
+        return flat_tokens.reshape(tokens.shape)
+
+    def get_last_hidden_features(self, obs_tensor: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.actor, TransformerActor):
+            return self.actor.get_last_hidden_features(
+                obs_tensor,
+                padding_mask=self._cached_padding_mask,
+                token_indices=self._cached_token_indices,
+                use_cached=True,
+            )
+        return self.actor[:-1](obs_tensor)
+
+    def _update_distribution(self, obs_tensor: torch.Tensor) -> None:
+        if self.transformer_actor_only and self.state_dependent_std:
+            raise ValueError("state_dependent_std is not supported with transformer_actor_only.")
+        if self.state_dependent_std:
+            return super()._update_distribution(obs_tensor)  # type: ignore[arg-type]
+        if self.transformer_actor_only:
+            mean = self.actor(
+                obs_tensor,
+                padding_mask=self._cached_padding_mask,
+                token_indices=self._cached_token_indices,
+            )
+        else:
+            mean = self.actor(obs_tensor)
+        if self.noise_std_type == "scalar":
+            std = self.std.expand_as(mean)
+        elif self.noise_std_type == "log":
+            std = torch.exp(self.log_std).expand_as(mean)
+        elif self.noise_std_type == "gsde":
+            features = self.get_last_hidden_features(obs_tensor)
+            distribution = cast(GSDENoiseDistribution, self.distribution)
+            distribution.proba_distribution(mean, self.log_std, features)
+            return
+        else:
+            raise ValueError(
+                f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar', 'log', or 'gsde'"
+            )
+        self.distribution = Normal(mean, std)
+
+    def update_normalization(self, obs: TensorDict) -> None:
+        if self.transformer_actor_only:
+            if self.actor_obs_normalization:
+                current_obs = super().get_actor_obs(obs)
+                tokens, padding_mask, _ = self._build_transformer_tokens(obs, current_obs)
+                # Update normalization with only valid tokens (advanced indexing).
+                actor_obs_normalizer = cast(EmpiricalNormalization, self.actor_obs_normalizer)
+                actor_obs_normalizer.update(tokens[~padding_mask])
+            if self.critic_obs_normalization:
+                critic_obs = self.get_critic_obs(obs)
+                critic_obs_normalizer = cast(EmpiricalNormalization, self.critic_obs_normalizer)
+                critic_obs_normalizer.update(critic_obs)
+            return
+        super().update_normalization(obs)

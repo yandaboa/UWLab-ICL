@@ -131,8 +131,10 @@ class BaseEventCfg:
         func=omni_reset_mdp.randomize_rigid_body_material,  # type: ignore
         mode="startup",
         params={
-            "static_friction_range": (1.0, 2.0),
-            "dynamic_friction_range": (0.9, 1.9),
+            "static_friction_range": (4.0, 6.0),
+            "dynamic_friction_range": (2.0, 3.0),
+            # "static_friction_range": (1.0, 2.0),
+            # "dynamic_friction_range": (0.9, 1.9),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("insertive_object"),
@@ -185,7 +187,8 @@ class BaseEventCfg:
         params={
             "asset_cfg": SceneEntityCfg("insertive_object"),
             # we assume insertive object is somewhere between 20g and 200g
-            "mass_distribution_params": (0.02, 0.2),
+            "mass_distribution_params": (1.0, 1.5),
+            # "mass_distribution_params": (0.02, 0.2),
             "operation": "abs",
             "distribution": "uniform",
             "recompute_inertia": True,
@@ -334,7 +337,7 @@ class ObservationsCfg:
                 "target_asset_cfg": SceneEntityCfg("receptive_object"),
                 "root_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
                 "rotation_repr": "axis_angle",
-                "ood_offset": 1.0,
+                # "ood_offset": 0.5,
             },
         )
 
@@ -344,7 +347,7 @@ class ObservationsCfg:
                 "target_asset_cfg": SceneEntityCfg("insertive_object"),
                 "root_asset_cfg": SceneEntityCfg("receptive_object"),
                 "rotation_repr": "axis_angle",
-                "ood_offset": 1.0,
+                # "ood_offset": 0.5,
             },
         )
 
@@ -390,7 +393,7 @@ class ObservationsCfg:
                 "target_asset_cfg": SceneEntityCfg("receptive_object"),
                 "root_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
                 "rotation_repr": "axis_angle",
-                "ood_offset": 1.0,
+                # "ood_offset": 1.0,
             },
         )
 
@@ -400,7 +403,7 @@ class ObservationsCfg:
                 "target_asset_cfg": SceneEntityCfg("insertive_object"),
                 "root_asset_cfg": SceneEntityCfg("receptive_object"),
                 "rotation_repr": "axis_angle",
-                "ood_offset": 1.0,
+                # "ood_offset": 1.0,
             },
         )
 

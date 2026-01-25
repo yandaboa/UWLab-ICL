@@ -171,7 +171,11 @@ def _strip_debug_obs(episode: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(episode)
     obs = cleaned.get("obs")
     if isinstance(obs, dict):
-        obs = {key: value for key, value in obs.items() if key not in {"debug", "debug_obs"}}
+        obs = {
+            key: value
+            for key, value in obs.items()
+            if key not in {"debug", "debug_obs"} and not key.startswith("debug/")
+        }
         cleaned["obs"] = obs
     return cleaned
 
