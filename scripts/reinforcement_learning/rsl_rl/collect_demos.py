@@ -291,7 +291,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 rollout_obs = {"demo": demo_obs, **debug_flat}
             else:
                 rollout_obs = demo_obs
-            rollout_storage.add_step(rollout_obs, actions, rewards, dones)
+            
+            real_actions = env.unwrapped.action_manager.prev_action
+            rollout_storage.add_step(rollout_obs, real_actions, rewards, dones)
             # reset recurrent states for episodes that have terminated
             done_mask = dones.to(torch.bool)
             policy_nn.reset(done_mask)

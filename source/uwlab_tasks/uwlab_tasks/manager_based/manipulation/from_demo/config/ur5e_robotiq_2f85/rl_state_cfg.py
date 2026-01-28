@@ -43,9 +43,9 @@ LOCAL_DATASETS_DIR = "reset_state_datasets"
 class ActionDiscretizationCfg:
     """Configuration for discretizing continuous actions."""
 
-    min_actions: tuple[float, ...] | float = (-50.0, -50.0, -50.0, -50.0, -50.0, -50.0, -50.0)
-    max_actions: tuple[float, ...] | float = (50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0)
-    num_bins: int = 101
+    min_actions: tuple[float, ...] | float = (-25.0, -25.0, -25.0, -25.0, -25.0, -25.0, -25.0)
+    max_actions: tuple[float, ...] | float = (25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0)
+    num_bins: int = 201
 
 
 @configclass
@@ -879,7 +879,31 @@ class FromDemoRewardsCfg:
 class DemoContextCfg:
     # episode_paths: str = "episodes/20260122_224145/episodes_000000.pt"
     episode_paths: list[str] = [
-        "episodes/20260127_052924/episodes_000000.pt",
+        "episodes/20260127_210349/episodes_000000.pt",
+        "episodes/20260127_210349/episodes_000001.pt",
+        "episodes/20260127_210349/episodes_000002.pt",
+        "episodes/20260127_210349/episodes_000003.pt",
+        "episodes/20260127_210349/episodes_000004.pt",
+        "episodes/20260127_210349/episodes_000005.pt",
+        "episodes/20260127_210349/episodes_000006.pt",
+        "episodes/20260127_210349/episodes_000007.pt",
+        "episodes/20260127_210349/episodes_000008.pt",
+        "episodes/20260127_210349/episodes_000009.pt",
+        "episodes/20260127_210349/episodes_000010.pt",
+        "episodes/20260127_210349/episodes_000011.pt",
+        "episodes/20260127_210349/episodes_000012.pt",
+        "episodes/20260127_210349/episodes_000013.pt",
+        "episodes/20260127_210349/episodes_000014.pt",
+        "episodes/20260127_210349/episodes_000015.pt",
+        "episodes/20260127_210349/episodes_000016.pt",
+        "episodes/20260127_210349/episodes_000017.pt",
+        "episodes/20260127_210349/episodes_000018.pt",
+        "episodes/20260127_210349/episodes_000019.pt",
+        "episodes/20260127_210349/episodes_000020.pt",
+        "episodes/20260127_210349/episodes_000021.pt",
+        "episodes/20260127_210349/episodes_000022.pt",
+        "episodes/20260127_210349/episodes_000023.pt",
+        "episodes/20260127_210349/episodes_000024.pt",
     ]
     state_noise_scale: float = 0.0
     download_dir: str | None = None

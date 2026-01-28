@@ -77,8 +77,10 @@ class PPOWithContextRunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
         bc_warmstart_cfg=BCFromContextWarmStartCfg(
+            # lr_warmup_steps=100,
             lr_warmup_steps=500,
             lr_warmup_start_ratio=0.1,
+            # num_steps=150,
             num_steps=5000,
             num_episodes_per_batch=8,
             num_minibatches=4,

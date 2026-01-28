@@ -35,6 +35,8 @@ class DiscreteActionWrapper(gym.Wrapper):
         if action_shape is None:
             raise ValueError("DiscreteActionWrapper requires a continuous action space with shape.")
         action_shape = tuple(int(dim) for dim in action_shape)
+        num_envs = getattr(getattr(self.env, "unwrapped", None), "num_envs", None)
+        per_env_shape = _strip_env_dim_shape(action_shape, num_envs)
 
         min_actions = _get_cfg_value(self._action_discretization_cfg, "min_actions")
         max_actions = _get_cfg_value(self._action_discretization_cfg, "max_actions")
@@ -44,9 +46,9 @@ class DiscreteActionWrapper(gym.Wrapper):
         if min_actions is None or max_actions is None:
             raise ValueError("DiscreteActionWrapper requires action min/max bounds to be set.")
 
-        self._action_shape = action_shape
-        self._action_min = _to_action_tensor(min_actions, action_shape)
-        self._action_max = _to_action_tensor(max_actions, action_shape)
+        self._action_shape = per_env_shape
+        self._action_min = _to_action_tensor(min_actions, per_env_shape, num_envs)
+        self._action_max = _to_action_tensor(max_actions, per_env_shape, num_envs)
         if not torch.isfinite(self._action_min).all() or not torch.isfinite(self._action_max).all():
             raise ValueError("DiscreteActionWrapper action bounds must be finite.")
         if torch.any(self._action_max < self._action_min):
@@ -65,6 +67,9 @@ class DiscreteActionWrapper(gym.Wrapper):
             actions = torch.as_tensor(actions, device=_resolve_env_device(self.env), dtype=torch.float32)
         min_actions = self._action_min.to(actions.device, dtype=actions.dtype)
         max_actions = self._action_max.to(actions.device, dtype=actions.dtype)
+        if actions.ndim == len(self._action_shape) + 1 and actions.shape[1:] == self._action_shape:
+            min_actions = min_actions.unsqueeze(0)
+            max_actions = max_actions.unsqueeze(0)
         step = (max_actions - min_actions) / (self._num_bins - 1)
         safe_step = torch.where(step == 0, torch.ones_like(step), step)
         indices = torch.round((actions - min_actions) / safe_step)
@@ -111,15 +116,33 @@ def _get_cfg_value(cfg: Any, name: str) -> Any:
     return getattr(cfg, name, None)
 
 
-def _to_action_tensor(values: Any, action_shape: tuple[int, ...]) -> torch.Tensor:
+def _to_action_tensor(values: Any, action_shape: tuple[int, ...], num_envs: int | None) -> torch.Tensor:
     tensor = torch.as_tensor(values, dtype=torch.float32)
     if tensor.ndim == 0:
         return tensor.expand(action_shape).clone()
+    if tuple(tensor.shape) != action_shape:
+        tensor = _strip_env_dim_tensor(tensor, num_envs)
     if tuple(tensor.shape) != action_shape:
         raise ValueError(
             f"Action bounds shape {tuple(tensor.shape)} does not match action shape {action_shape}."
         )
     return tensor
+
+
+def _strip_env_dim_shape(shape: tuple[int, ...], num_envs: int | None) -> tuple[int, ...]:
+    if num_envs is None or not shape:
+        return shape
+    if shape[0] != num_envs:
+        return shape
+    return shape[1:]
+
+
+def _strip_env_dim_tensor(tensor: torch.Tensor, num_envs: int | None) -> torch.Tensor:
+    if num_envs is None or tensor.ndim == 0:
+        return tensor
+    if tensor.shape[0] != num_envs:
+        return tensor
+    return tensor[0]
 
 
 def _resolve_env_device(env: gym.Env) -> torch.device | None:

@@ -187,7 +187,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if context is not None:
         action_discretization_spec = getattr(context, "action_discretization_spec", None)
         if action_discretization_spec is not None:
-            logger.info("Loaded action discretization spec from demo episodes.")
+            print("Loaded action discretization spec from demo episodes.")
 
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":

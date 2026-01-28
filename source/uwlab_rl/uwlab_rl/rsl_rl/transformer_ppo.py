@@ -7,8 +7,10 @@ import torch.nn as nn
 import torch.optim as optim
 
 from rsl_rl.algorithms.ppo import PPO
+from rsl_rl.storage.rollout_storage import RolloutStorage
 from tensordict import TensorDict
 from uwlab_rl.rsl_rl.lr_utils import cosine_annealing_with_warmup, linear_warmup
+from uwlab_rl.rsl_rl.discrete_action_rollout_storage import DiscreteActionRolloutStorage
 
 class CompositeOptimizer:
     """Proxy optimizer that forwards to policy and encoder optimizers."""
@@ -57,6 +59,8 @@ class PPOWithLongContext(PPO):
     ) -> None:
         super().__init__(policy, **kwargs)
         self.num_learning_iterations = num_learning_iterations
+        if getattr(policy, "action_distribution", "normal") == "categorical":
+            self.transition = DiscreteActionRolloutStorage.Transition()
 
         # ---- BF16 AMP toggle ----
         # Enable only on CUDA; BF16 autocast is CUDA-only in torch.cuda.amp
@@ -97,6 +101,54 @@ class PPOWithLongContext(PPO):
         self.encoder_params = encoder_params
         self.transformer_max_grad_norm = self._get_cfg_value(cfg, "max_grad_norm", self.max_grad_norm)
         self.last_encoder_grad_norm = 0.0
+
+    def init_storage(
+        self,
+        training_type: str,
+        num_envs: int,
+        num_transitions_per_env: int,
+        obs: TensorDict,
+        actions_shape: tuple[int] | list[int],
+    ) -> None:
+        if getattr(self.policy, "action_distribution", "normal") == "categorical":
+            action_bins = getattr(self.policy, "action_bins", None)
+            if not action_bins:
+                raise ValueError("Categorical policy must define action_bins.")
+            action_logits_shape = (int(sum(action_bins)),)
+            self.storage = DiscreteActionRolloutStorage(
+                training_type,
+                num_envs,
+                num_transitions_per_env,
+                obs,
+                actions_shape,
+                self.device,
+                action_logits_shape=action_logits_shape,
+            )
+            return
+        self.storage = RolloutStorage(
+            training_type,
+            num_envs,
+            num_transitions_per_env,
+            obs,
+            actions_shape,
+            self.device,
+        )
+
+    def act(self, obs: TensorDict) -> torch.Tensor:
+        if self.policy.is_recurrent:
+            self.transition.hidden_states = self.policy.get_hidden_states()
+        self.transition.actions = self.policy.act(obs).detach()
+        self.transition.values = self.policy.evaluate(obs).detach()
+        self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
+        if getattr(self.policy, "action_distribution", "normal") == "categorical":
+            self.transition.action_logits = self.policy.action_logits.detach()
+            self.transition.action_mean = None
+            self.transition.action_sigma = None
+        else:
+            self.transition.action_mean = self.policy.action_mean.detach()
+            self.transition.action_sigma = self.policy.action_std.detach()
+        self.transition.observations = obs
+        return self.transition.actions
 
     def _build_transformer_optimizer(self, cfg: Any, params: Iterable) -> optim.Optimizer:
         optimizer_class = self._get_cfg_value(cfg, "optimizer_class", "AdamW")
@@ -152,23 +204,37 @@ class PPOWithLongContext(PPO):
         else:
             mean_symmetry_loss = None
 
-        if self.policy.is_recurrent:
-            generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
-        else:
-            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
-        for (
-            obs_batch,
-            actions_batch,
-            target_values_batch,
-            advantages_batch,
-            returns_batch,
-            old_actions_log_prob_batch,
-            old_mu_batch,
-            old_sigma_batch,
-            hid_states_batch,
-            masks_batch,
-        ) in generator:
+        for batch in generator:
+            if len(batch) == 11:
+                (
+                    obs_batch,
+                    actions_batch,
+                    target_values_batch,
+                    advantages_batch,
+                    returns_batch,
+                    old_actions_log_prob_batch,
+                    old_mu_batch,
+                    old_sigma_batch,
+                    old_action_logits_batch,
+                    hid_states_batch,
+                    masks_batch,
+                ) = batch
+            else:
+                (
+                    obs_batch,
+                    actions_batch,
+                    target_values_batch,
+                    advantages_batch,
+                    returns_batch,
+                    old_actions_log_prob_batch,
+                    old_mu_batch,
+                    old_sigma_batch,
+                    hid_states_batch,
+                    masks_batch,
+                ) = batch
+                old_action_logits_batch = None
             num_aug = 1
             original_batch_size = obs_batch.shape[0]
 
@@ -186,6 +252,8 @@ class PPOWithLongContext(PPO):
                 target_values_batch = target_values_batch.repeat(num_aug, 1)
                 advantages_batch = advantages_batch.repeat(num_aug, 1)
                 returns_batch = returns_batch.repeat(num_aug, 1)
+                if old_action_logits_batch is not None:
+                    old_action_logits_batch = old_action_logits_batch.repeat(num_aug, 1)
 
             # ---- forward + losses under BF16 autocast ----
             with self._amp_ctx():
@@ -250,15 +318,33 @@ class PPOWithLongContext(PPO):
 
             # ---- KL/adaptive LR is inference-only; keep outside autocast ----
             action_distribution = getattr(self.policy, "action_distribution", "normal")
-            if action_distribution != "categorical" and self.desired_kl is not None and self.schedule == "adaptive":
+            if self.desired_kl is not None and self.schedule == "adaptive":
                 with torch.inference_mode():
-                    kl = torch.sum(
-                        torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
-                        + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
-                        / (2.0 * torch.square(sigma_batch))
-                        - 0.5,
-                        axis=-1,
-                    )
+                    if action_distribution == "categorical":
+                        if old_action_logits_batch is None:
+                            raise RuntimeError("Missing old_action_logits_batch for categorical KL.")
+                        old_logits = old_action_logits_batch[:original_batch_size]
+                        new_logits = self.policy.action_logits[:original_batch_size].detach()
+                        action_bins = getattr(self.policy, "action_bins", None)
+                        if not action_bins:
+                            raise RuntimeError("Categorical policy must define action_bins.")
+                        old_splits = torch.split(old_logits, action_bins, dim=-1)
+                        new_splits = torch.split(new_logits, action_bins, dim=-1)
+                        kl_parts = []
+                        for old_split, new_split in zip(old_splits, new_splits):
+                            old_log_probs = torch.log_softmax(old_split, dim=-1)
+                            new_log_probs = torch.log_softmax(new_split, dim=-1)
+                            old_probs = torch.softmax(old_split, dim=-1)
+                            kl_parts.append((old_probs * (old_log_probs - new_log_probs)).sum(dim=-1))
+                        kl = torch.stack(kl_parts, dim=-1).sum(dim=-1)
+                    else:
+                        kl = torch.sum(
+                            torch.log(sigma_batch / old_sigma_batch + 1.0e-5)
+                            + (torch.square(old_sigma_batch) + torch.square(old_mu_batch - mu_batch))
+                            / (2.0 * torch.square(sigma_batch))
+                            - 0.5,
+                            axis=-1,
+                        )
                     kl_mean = torch.mean(kl)
 
                     if self.is_multi_gpu:

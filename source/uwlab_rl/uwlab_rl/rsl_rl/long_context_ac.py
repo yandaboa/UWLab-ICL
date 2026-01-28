@@ -80,6 +80,7 @@ class LongContextActorCritic(ActorCritic):
         self.action_discretization_spec = action_discretization_spec
         self.action_bins: tuple[int, ...] | None = None
         self.action_bin_values: list[torch.Tensor] | None = None
+        self._last_action_logits = torch.empty(0)
         if self.action_distribution == "categorical":
             if self.state_dependent_std:
                 raise ValueError("state_dependent_std is not supported with categorical actions.")
@@ -399,7 +400,8 @@ class LongContextActorCritic(ActorCritic):
             if self.action_distribution == "categorical":
                 self._update_categorical_distribution(logits)
                 return self._categorical_indices_to_values(self.distribution.mode)
-            return logits
+            else:
+                return logits
         if self.context_encoder is None:
             raise RuntimeError("Context encoder is not initialized.")
         context_hidden = self.context_encoder(demo_obs, demo_actions, demo_rewards)
@@ -545,6 +547,7 @@ class LongContextActorCritic(ActorCritic):
                 )
             else:
                 logits = self.actor(obs_tensor)
+            self._last_action_logits = logits
             self._update_categorical_distribution(logits)
             return
         if self.state_dependent_std:
@@ -571,8 +574,16 @@ class LongContextActorCritic(ActorCritic):
                 f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar', 'log', or 'gsde'"
             )
         self.distribution = Normal(mean, std)
+        self._last_action_logits = torch.empty(0)
+
+    @property
+    def action_logits(self) -> torch.Tensor:
+        if self._last_action_logits.numel() == 0:
+            raise RuntimeError("Action logits are not available for the current policy.")
+        return self._last_action_logits
 
     def _categorical_indices_to_values(self, indices: torch.Tensor) -> torch.Tensor:
+        indices = indices.to(dtype=torch.long)
         if self.action_bin_values is None:
             return indices
         values = []
