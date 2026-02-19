@@ -9,14 +9,17 @@ from tensordict import TensorDict
 
 from rsl_rl.modules.actor_critic import ActorCritic, GSDENoiseDistribution
 from uwlab_rl.rsl_rl.distributions import IndependentCategoricalDistribution
+from .context_token_builder import ContextTokenBuilder
 from .transformers import (
     EpisodeEncoder,
     MergedTokenTransformerActor,
+    StateOnlyTransformerActor,
     TransformerActor,
     StateActionTransformerActor,
 )
 from rsl_rl.networks.normalization import EmpiricalNormalization
 from rsl_rl.networks.mlp import MLP
+
 
 class LongContextActorCritic(ActorCritic):
     """Actor-critic that threads additional context into observations."""
@@ -48,7 +51,11 @@ class LongContextActorCritic(ActorCritic):
         context_length_override: int | None = None,
         cross_attention_merge: bool = False,
         obs_token_count: int = 4,
-        transformer_actor_class_name: str | None = None,
+        context_token_layout: str | None = None,
+        include_actions_in_context: bool = True,
+        include_rewards_in_context: bool = True,
+        share_current_and_context_obs_projection: bool = False,
+        encoding_projection_hidden_dim: int | None = None,
         optimizer: Optional[Any] = None,
         log_attention_entropy: bool = False,
         attention_entropy_interval: int = 0,
@@ -108,14 +115,19 @@ class LongContextActorCritic(ActorCritic):
         self.transformer_optimizer_cfg = optimizer
         self.cross_attention_merge = cross_attention_merge
         self.obs_token_count = obs_token_count
-        self.transformer_actor_class_name = transformer_actor_class_name
+        self.context_token_layout = context_token_layout
+        self.include_actions_in_context = bool(include_actions_in_context)
+        self.include_rewards_in_context = bool(include_rewards_in_context)
+        self.share_obs_projection = bool(share_current_and_context_obs_projection)
+        self.encoding_projection_hidden_dim = encoding_projection_hidden_dim
         self.context_length_override = context_length_override
         self._cached_padding_mask: Optional[torch.Tensor] = None
         self._cached_token_indices: Optional[torch.Tensor] = None
-        self.context_token_proj: Optional[nn.Linear] = None
-        self.state_token_proj: Optional[nn.Linear] = None
-        self.action_token_proj: Optional[nn.Linear] = None
-        self.current_obs_proj: Optional[nn.Linear] = None
+        self.context_token_proj: Optional[nn.Module] = None
+        self.state_token_proj: Optional[nn.Module] = None
+        self.action_token_proj: Optional[nn.Module] = None
+        self.current_obs_proj: Optional[nn.Module] = None
+        self.context_token_builder: Optional[ContextTokenBuilder] = None
         self.token_embed_dim: Optional[int] = None
         self.current_obs_dim: Optional[int] = None
         self.log_attention_entropy = bool(log_attention_entropy)
@@ -125,8 +137,8 @@ class LongContextActorCritic(ActorCritic):
         if self.context_keys and isinstance(self.context_keys, str) and self.context_keys in obs:
             self._initialize_transformer(obs)
 
-    """ 
-    This function can be called with obs[self.context_keys] as a TensorDict or as a concatenated tensor 
+    """
+    This function can be called with obs[self.context_keys] as a TensorDict or as a concatenated tensor
     We want to handle both cases and return the demo_obs, demo_actions, demo_rewards, demo_lengths
     demo_obs is a tensor of shape (num_envs, max_length, num_obs)
     demo_actions is a tensor of shape (num_envs, max_length, num_actions)
@@ -137,7 +149,7 @@ class LongContextActorCritic(ActorCritic):
     this means it will be a concatenated tensor of shape (num_envs, max_length, num_obs + num_actions + num_rewards)
     we also need to add a length field to the obs tensor to indicate the length of the context
     """
-    
+
     def _process_context_obs(self, obs: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         context_obs = obs[self.context_keys]
         if isinstance(context_obs, TensorDict):
@@ -159,20 +171,20 @@ class LongContextActorCritic(ActorCritic):
             demo_actions = context_obs[..., start_idx:start_idx + self.num_actions]
             start_idx += self.num_actions
             demo_rewards = context_obs[..., start_idx:start_idx + self.num_rewards]
-            
             demo_lengths = obs["context_lengths"]
-        
+
         demo_lengths = demo_lengths.to(dtype=torch.int32)
         return demo_obs, demo_actions, demo_rewards, demo_lengths
 
     def _resolve_context_lengths(self, demo_lengths: torch.Tensor) -> tuple[torch.Tensor, int]:
-        lengths = demo_lengths.to(dtype=torch.long).squeeze(-1)
-        max_context_length = int(lengths.max().item())
-        # max_context_length = 100
-        if self.context_length_override is not None:
-            max_context_length = min(max_context_length, self.context_length_override)
-            lengths = torch.clamp(lengths, max=max_context_length)
-        return lengths, max_context_length
+        if self.context_token_builder is None:
+            lengths = demo_lengths.to(dtype=torch.long).squeeze(-1)
+            max_context_length = int(lengths.max().item())
+            if self.context_length_override is not None:
+                max_context_length = min(max_context_length, self.context_length_override)
+                lengths = torch.clamp(lengths, max=max_context_length)
+            return lengths, max_context_length
+        return self.context_token_builder.resolve_context_lengths(demo_lengths)
 
     def enable_actor_only_loading(self, enabled: bool = True) -> None:
         """Enable loading only actor-related parameters from a checkpoint."""
@@ -194,10 +206,12 @@ class LongContextActorCritic(ActorCritic):
             return False
         return super().load_state_dict(state_dict, strict=strict)
     
-    def _initialize_transformer(self, obs: TensorDict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _initialize_transformer(
+        self,
+        obs: TensorDict,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         demo_obs, demo_actions, demo_rewards, demo_lengths = self._process_context_obs(obs)
 
-        
         self.num_obs = demo_obs.shape[-1]
         num_actions = demo_actions.shape[-1]
         assert num_actions == self.num_actions, "Number of actions must match, or you've shifted action spaces??"
@@ -215,16 +229,36 @@ class LongContextActorCritic(ActorCritic):
                     raise ValueError("state_dependent_std is not supported with transformer-only actors.")
                 token_embed_dim = int(self.transformer_args["embedding_dim"])
                 self.token_embed_dim = token_embed_dim
-                actor_class = self._resolve_transformer_actor_class()
-                if actor_class is StateActionTransformerActor:
-                    self.state_token_proj = nn.Linear(self.num_obs, token_embed_dim)
-                    self.action_token_proj = nn.Linear(self.num_actions, token_embed_dim)
+                layout = self._resolve_context_layout()
+                actor_class = self._resolve_transformer_actor_class(layout)
+                if layout in {"state_action", "state_only"}:
+                    self.state_token_proj = self._make_projection(self.num_obs, token_embed_dim)
+                    if layout == "state_action":
+                        self.action_token_proj = self._make_projection(self.num_actions, token_embed_dim)
+                    if not self.share_obs_projection:
+                        self.current_obs_proj = self._make_projection(num_actor_obs, token_embed_dim)
                 else:
-                    token_input_dim = self.num_obs + self.num_actions + self.num_rewards
-                    self.context_token_proj = nn.Linear(token_input_dim, token_embed_dim)
-                self.current_obs_proj = nn.Linear(num_actor_obs, token_embed_dim)
+                    token_input_dim = self.num_obs
+                    if self.include_actions_in_context:
+                        token_input_dim += self.num_actions
+                    if self.include_rewards_in_context:
+                        token_input_dim += self.num_rewards
+                    self.context_token_proj = self._make_projection(token_input_dim, token_embed_dim)
+                    if self.share_obs_projection and token_input_dim != num_actor_obs:
+                        raise ValueError(
+                            "share_current_and_context_obs_projection=True requires current_obs and "
+                            "context token features to match. For merged layout this usually means "
+                            "disabling include_actions_in_context/include_rewards_in_context."
+                        )
+                    if not self.share_obs_projection:
+                        self.current_obs_proj = self._make_projection(num_actor_obs, token_embed_dim)
+                if self.share_obs_projection and self.num_obs != num_actor_obs:
+                    raise ValueError(
+                        "share_current_and_context_obs_projection=True requires matching current_obs "
+                        f"and context_obs dims, got current_obs={num_actor_obs}, context_obs={self.num_obs}."
+                    )
                 max_token_length = max_context_length + 1
-                if actor_class is StateActionTransformerActor:
+                if layout == "state_action":
                     max_token_length = (2 * max_context_length) + 1
                 categorical_actions = self.action_distribution == "categorical"
                 action_bins = list(self.action_bins or [])
@@ -245,6 +279,13 @@ class LongContextActorCritic(ActorCritic):
                     causal=True,
                 )
                 self.context_encoder = self.actor.encoder
+                self.context_token_builder = ContextTokenBuilder(
+                    layout=layout,
+                    context_length_override=self.context_length_override,
+                    include_actions=self.include_actions_in_context,
+                    include_rewards=self.include_rewards_in_context,
+                    share_obs_projection=self.share_obs_projection,
+                )
                 if self.actor_obs_normalization:
                     self.actor_obs_normalizer = EmpiricalNormalization(token_embed_dim)
                 else:
@@ -288,22 +329,37 @@ class LongContextActorCritic(ActorCritic):
 
         return demo_obs, demo_actions, demo_rewards, demo_lengths
 
-    def _resolve_transformer_actor_class(self) -> type[TransformerActor]:
-        actor_class_name = self.transformer_actor_class_name
-        if actor_class_name is None:
-            raise ValueError("transformer_actor_class_name must be set for transformer-only actors.")
-        actor_classes: dict[str, type[TransformerActor]] = {
-            "MergedTokenTransformerActor": MergedTokenTransformerActor,
-            "StateActionTransformerActor": StateActionTransformerActor,
-            # Backward-compatible alias.
-            "TransformerActor": MergedTokenTransformerActor,
-        }
-        if actor_class_name not in actor_classes:
-            raise ValueError(f"Unknown transformer actor class: {actor_class_name}")
-        return actor_classes[actor_class_name]
+    def _resolve_context_layout(self) -> str:
+        layout = self.context_token_layout
+        if layout is None:
+            raise ValueError("context_token_layout must be set for transformer-only actors.")
+        return layout
+
+    def _make_projection(self, input_dim: int, output_dim: int) -> nn.Module:
+        hidden_dim = self.encoding_projection_hidden_dim
+        if hidden_dim is None:
+            return nn.Linear(input_dim, output_dim)
+        if hidden_dim <= 0:
+            raise ValueError("encoding_projection_hidden_dim must be > 0 when provided.")
+        return nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def _resolve_transformer_actor_class(self, layout: str) -> type[TransformerActor]:
+        match layout:
+            case "state_action":
+                return StateActionTransformerActor
+            case "merged":
+                return MergedTokenTransformerActor
+            case "state_only":
+                return StateOnlyTransformerActor
+            case _:
+                raise ValueError(f"Unknown context_token_layout: {layout}")
 
     def _use_transformer_actor(self) -> bool:
-        return self.transformer_actor_class_name is not None
+        return self.context_token_layout is not None
 
     def get_context_obs(self, obs: TensorDict) -> Optional[torch.Tensor]:
         """Return the context observation tensor to append to base inputs."""
@@ -538,38 +594,22 @@ class LongContextActorCritic(ActorCritic):
         current_obs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build transformer tokens from explicit context tensors."""
-        if self.transformer_actor_class_name == "StateActionTransformerActor":
-            return self._build_state_action_transformer_tokens_from_context(
-                demo_obs=demo_obs,
-                demo_actions=demo_actions,
-                demo_lengths=demo_lengths,
-                current_obs=current_obs,
-            )
-        else:
-            context_lengths, max_context_length = self._resolve_context_lengths(demo_lengths)
-            if self.current_obs_dim is None or current_obs.shape[-1] != self.current_obs_dim:
-                raise ValueError("Current observation dim must match policy obs dim.")
-            if self.context_token_proj is None or self.current_obs_proj is None or self.token_embed_dim is None:
-                raise RuntimeError("Transformer projections are not initialized.")
-            context_tokens = torch.cat([demo_obs, demo_actions, demo_rewards], dim=-1)
-            context_tokens = self.context_token_proj(context_tokens)
-            context_tokens = context_tokens[:, :max_context_length, :]
-            num_envs = context_tokens.shape[0]
-            token_dim = context_tokens.shape[-1]
-            max_token_length = max_context_length + 1
-            tokens = torch.zeros(
-                (num_envs, max_token_length, token_dim),
-                device=context_tokens.device,
-                dtype=context_tokens.dtype,
-            )
-            tokens[:, :max_context_length, :] = context_tokens
-            current_token = self.current_obs_proj(current_obs)
-            batch_indices = torch.arange(num_envs, device=context_tokens.device)
-            # Insert current step token at the per-env index (advanced indexing).
-            tokens[batch_indices, context_lengths, :] = current_token
-            positions = torch.arange(max_token_length, device=context_tokens.device).unsqueeze(0)
-            padding_mask = positions > context_lengths.unsqueeze(1)
-            return tokens, padding_mask, context_lengths
+        if self.context_token_builder is None:
+            raise RuntimeError("Context token builder is not initialized.")
+        current_obs_proj = self._resolve_current_obs_proj_for_tokens()
+        output = self.context_token_builder.build_tokens_from_context(
+            demo_obs=demo_obs,
+            demo_actions=demo_actions,
+            demo_rewards=demo_rewards,
+            demo_lengths=demo_lengths,
+            current_obs=current_obs,
+            context_token_proj=self.context_token_proj,
+            state_token_proj=self.state_token_proj,
+            action_token_proj=self.action_token_proj,
+            current_obs_proj=current_obs_proj,
+            current_obs_dim=self.current_obs_dim,
+        )
+        return output.tokens, output.padding_mask, output.token_indices
 
     def _build_state_action_transformer_tokens_from_context(
         self,
@@ -579,32 +619,38 @@ class LongContextActorCritic(ActorCritic):
         current_obs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build state/action interleaved tokens (s1, a1, s2, a2, ...)."""
-        context_lengths, max_context_length = self._resolve_context_lengths(demo_lengths)
-        if self.current_obs_dim is None or current_obs.shape[-1] != self.current_obs_dim:
-            raise ValueError("Current observation dim must match policy obs dim.")
-        if self.state_token_proj is None or self.action_token_proj is None or self.current_obs_proj is None:
-            raise RuntimeError("State/action transformer projections are not initialized.")
-        state_tokens = self.state_token_proj(demo_obs)
-        action_tokens = self.action_token_proj(demo_actions)
-        state_tokens = state_tokens[:, :max_context_length, :]
-        action_tokens = action_tokens[:, :max_context_length, :]
-        num_envs = state_tokens.shape[0]
-        token_dim = state_tokens.shape[-1]
-        max_token_length = (2 * max_context_length) + 1
-        tokens = torch.zeros(
-            (num_envs, max_token_length, token_dim),
-            device=state_tokens.device,
-            dtype=state_tokens.dtype,
+        if self.context_token_builder is None:
+            raise RuntimeError("Context token builder is not initialized.")
+        if self.context_token_builder.layout != "state_action":
+            raise RuntimeError("State/action token builder not configured.")
+        current_obs_proj = self._resolve_current_obs_proj_for_tokens()
+        output = self.context_token_builder.build_tokens_from_context(
+            demo_obs=demo_obs,
+            demo_actions=demo_actions,
+            demo_rewards=torch.empty_like(demo_actions[..., :1]),
+            demo_lengths=demo_lengths,
+            current_obs=current_obs,
+            context_token_proj=self.context_token_proj,
+            state_token_proj=self.state_token_proj,
+            action_token_proj=self.action_token_proj,
+            current_obs_proj=current_obs_proj,
+            current_obs_dim=self.current_obs_dim,
         )
-        tokens[:, 0 : 2 * max_context_length : 2, :] = state_tokens
-        tokens[:, 1 : 2 * max_context_length : 2, :] = action_tokens
-        current_token = self.current_obs_proj(current_obs)
-        batch_indices = torch.arange(num_envs, device=state_tokens.device)
-        token_indices = 2 * context_lengths
-        tokens[batch_indices, token_indices, :] = current_token
-        positions = torch.arange(max_token_length, device=state_tokens.device).unsqueeze(0)
-        padding_mask = positions > token_indices.unsqueeze(1)
-        return tokens, padding_mask, token_indices
+        return output.tokens, output.padding_mask, output.token_indices
+
+    def _resolve_current_obs_proj_for_tokens(self) -> nn.Module:
+        if not self.share_obs_projection:
+            if self.current_obs_proj is None:
+                raise RuntimeError("current_obs_proj is not initialized.")
+            return self.current_obs_proj
+        layout = self._resolve_context_layout()
+        if layout in {"state_action", "state_only"}:
+            if self.state_token_proj is None:
+                raise RuntimeError("state_token_proj is not initialized.")
+            return self.state_token_proj
+        if self.context_token_proj is None:
+            raise RuntimeError("context_token_proj is not initialized.")
+        return self.context_token_proj
 
     def _normalize_transformer_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
         if not self.actor_obs_normalization:

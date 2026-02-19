@@ -129,7 +129,7 @@ class TrajectoryPairCollector:
             raise KeyError("Trajectory logging requires debug observations in obs_buf.")
         obs_shape = {obs_key: tuple(pose_obs.shape[1:])}
         action_space = getattr(self._env.unwrapped, "single_action_space", self._env.action_space)
-        action_shape = from_demo_utils.extract_action_shape(action_space)
+        action_shape = from_demo_utils.extract_action_shape(action_space, num_envs=self._num_envs)
         max_steps = getattr(self._env.unwrapped, "max_episode_length", 0)
         return RolloutStorage(
             num_envs=self._num_envs,

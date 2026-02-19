@@ -31,6 +31,18 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
+parser.add_argument(
+    "--supervised_context_checkpoint",
+    type=str,
+    default=None,
+    help="Path to a supervised context checkpoint (overrides RL policy).",
+)
+parser.add_argument(
+    "--supervised_open_loop",
+    action="store_true",
+    default=False,
+    help="Use open-loop supervised eval (feed context obs as current_obs).",
+)
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
     "--use_pretrained_checkpoint",
@@ -62,6 +74,7 @@ import os
 import time
 from datetime import datetime
 from typing import Any, Mapping, cast
+from tqdm import tqdm
 
 import torch
 
@@ -71,6 +84,8 @@ from uwlab_rl.rsl_rl.transformer_ppo import PPOWithLongContext
 from uwlab_rl.rsl_rl.long_context_ac import LongContextActorCritic
 from uwlab_rl.rsl_rl.actor_critic import ActorCritic
 from uwlab_rl.rsl_rl.distillation_runner import DistillationRunner
+from uwlab_rl.rsl_rl.context_sequence_policy import ContextSequencePolicy
+from uwlab_rl.rsl_rl.supervised_eval_helper import SupervisedEvalHelper, SupervisedOpenLoopEvalHelper
 
 import importlib
 runner_mod = importlib.import_module("rsl_rl.runners.on_policy_runner")
@@ -99,6 +114,7 @@ from uwlab_tasks.utils.hydra import hydra_task_config
 from uwlab_tasks.manager_based.manipulation.from_demo.mdp import utils as from_demo_utils
 from metalearning.rollout_pair_storage import RolloutPairStorage, demo_to_episode, rollout_to_episode
 from metalearning.rollout_storage import RolloutStorage
+from metalearning.eval_wandb_utils import EvalWandbLogger, get_tracking_metrics_term, init_eval_wandb
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
@@ -160,7 +176,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
-    log_dir = os.path.dirname(resume_path)
+    use_supervised = args_cli.supervised_context_checkpoint is not None
+    if args_cli.supervised_open_loop and not use_supervised:
+        raise ValueError("Open-loop supervised eval requires --supervised_context_checkpoint.")
+    supervised_ckpt_path = None
+    if use_supervised:
+        supervised_ckpt_path = retrieve_file_path(args_cli.supervised_context_checkpoint)
+        resume_run_tag = os.path.basename(os.path.dirname(resume_path))
+        resume_ckpt_tag = os.path.splitext(os.path.basename(resume_path))[0]
+        supervised_ckpt_tag = os.path.splitext(os.path.basename(supervised_ckpt_path))[0]
+        log_dir = os.path.join(
+            os.path.dirname(supervised_ckpt_path),
+            "eval_demo_tracking",
+            f"rl_{resume_run_tag}",
+            f"checkpoint_{resume_ckpt_tag}",
+            f"supervised_{supervised_ckpt_tag}",
+        )
+    else:
+        log_dir = os.path.dirname(resume_path)
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
@@ -180,7 +213,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print("Loaded action discretization spec from demo episodes.")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    rollout_dir = os.path.join(log_dir, "rollouts", "demo_tracking", timestamp)
+    rollout_dir = os.path.join(log_dir, "demo_tracking_rollouts", timestamp)
     rollout_pair_storage = RolloutPairStorage(args_cli.max_rollouts_before_saving, rollout_dir)
 
     # wrap for video recording
@@ -198,48 +231,62 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    agent_cfg_dict = agent_cfg.to_dict()
-    if action_discretization_spec is not None:
-        policy_cfg = agent_cfg_dict.get("policy", {})
-        policy_cfg["action_discretization_spec"] = action_discretization_spec
-        agent_cfg_dict["policy"] = policy_cfg
-    if "bc_warmstart_cfg" in agent_cfg_dict.get("algorithm", {}):
-        agent_cfg_dict["algorithm"].pop("bc_warmstart_cfg")
-    if agent_cfg_dict["algorithm"]["class_name"] == "PPOWithLongContext":
-        agent_cfg_dict["algorithm"]["num_learning_iterations"] = agent_cfg.max_iterations
-    # load previously trained model
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg_dict, log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg_dict, log_dir=None, device=agent_cfg.device)
+    if use_supervised and supervised_ckpt_path is not None:
+        device = torch.device(env.unwrapped.device)
+        checkpoint = torch.load(supervised_ckpt_path, map_location=device)
+        supervised_model, _ = ContextSequencePolicy.from_checkpoint(checkpoint, device)
+        supervised_model.eval()
+        supervised_obs_keys = supervised_model.cfg.data.obs_keys
+        if not supervised_obs_keys:
+            raise RuntimeError("Supervised context checkpoint is missing obs_keys.")
+        policy = None
+        policy_nn = None
+        print(f"[INFO]: Using supervised context policy from: {args_cli.supervised_context_checkpoint}")
     else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    if hasattr(runner, "alg") and hasattr(runner.alg, "policy"):
-        policy = runner.alg.policy
-        if hasattr(policy, "enable_actor_only_loading"):
-            policy.enable_actor_only_loading(True)
-    runner.load(resume_path)
+        print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+        agent_cfg_dict = agent_cfg.to_dict()
+        if action_discretization_spec is not None:
+            policy_cfg = agent_cfg_dict.get("policy", {})
+            policy_cfg["action_discretization_spec"] = action_discretization_spec
+            agent_cfg_dict["policy"] = policy_cfg
+        if "bc_warmstart_cfg" in agent_cfg_dict.get("algorithm", {}):
+            agent_cfg_dict["algorithm"].pop("bc_warmstart_cfg")
+        # load previously trained model
+        if agent_cfg.class_name == "OnPolicyRunner":
+            runner = OnPolicyRunner(env, agent_cfg_dict, log_dir=None, device=agent_cfg.device)
+            print(f"[INFO]: Using on-policy runner from: {resume_path}")
+        elif agent_cfg.class_name == "DistillationRunner":
+            runner = DistillationRunner(env, agent_cfg_dict, log_dir=None, device=agent_cfg.device)
+            print(f"[INFO]: Using distillation runner from: {resume_path}")
+        else:
+            raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+        if hasattr(runner, "alg") and hasattr(runner.alg, "policy"):
+            policy = runner.alg.policy
+            if hasattr(policy, "enable_actor_only_loading"):
+                policy.enable_actor_only_loading(True)
+        runner.load(resume_path)
 
-    # obtain the trained policy for inference
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
+        # obtain the trained policy for inference
+        policy = runner.get_inference_policy(device=env.unwrapped.device)
+        if policy is None:
+            raise RuntimeError("Failed to create inference policy.")
 
-    # extract the neural network module
-    # we do this in a try-except to maintain backwards compatibility.
-    try:
-        # version 2.3 onwards
-        policy_nn = runner.alg.policy
-    except AttributeError:
-        # version 2.2 and below
-        policy_nn = runner.alg.actor_critic
+        # extract the neural network module
+        # we do this in a try-except to maintain backwards compatibility.
+        try:
+            # version 2.3 onwards
+            policy_nn = runner.alg.policy
+        except AttributeError:
+            # version 2.2 and below
+            policy_nn = runner.alg.actor_critic
 
-    # extract the normalizer
-    if hasattr(policy_nn, "actor_obs_normalizer"):
-        normalizer = policy_nn.actor_obs_normalizer
-    elif hasattr(policy_nn, "student_obs_normalizer"):
-        normalizer = policy_nn.student_obs_normalizer
-    else:
-        normalizer = None
+        # extract the normalizer
+        if hasattr(policy_nn, "actor_obs_normalizer"):
+            normalizer = policy_nn.actor_obs_normalizer
+        elif hasattr(policy_nn, "student_obs_normalizer"):
+            normalizer = policy_nn.student_obs_normalizer
+        else:
+            normalizer = None
 
     # export policy to onnx/jit
     # export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
@@ -255,7 +302,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     debug_obs = obs_buf.get("debug") if isinstance(obs_buf, Mapping) else None
     obs_shape = from_demo_utils.extract_obs_shape(policy_obs, debug_obs)
     action_space = getattr(env.unwrapped, "single_action_space", env.action_space)
-    action_shape = from_demo_utils.extract_action_shape(action_space)
+    action_shape = from_demo_utils.extract_action_shape(action_space, num_envs=env.unwrapped.num_envs)
     max_steps = getattr(env.unwrapped, "max_episode_length", args_cli.video_length)
     rollout_storage = RolloutStorage(
         num_envs=env.unwrapped.num_envs,
@@ -275,17 +322,55 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         else None
     )
     demo_lengths_snapshot = demo_context.demo_obs_lengths.detach().cpu().clone()
+    if use_supervised:
+        supervised_helper = SupervisedEvalHelper(
+            model=supervised_model,
+            demo_context=demo_context,
+            device=torch.device(env.unwrapped.device),
+            obs_keys=supervised_obs_keys,
+        )
+        if args_cli.supervised_open_loop:
+            supervised_helper = SupervisedOpenLoopEvalHelper(
+                model=supervised_model,
+                demo_context=demo_context,
+                device=torch.device(env.unwrapped.device),
+                obs_keys=supervised_obs_keys,
+            )
+
+    # Wandb logging for eval (same kinds of metrics as train: reward, tracking error)
+    wandb_run, _wandb_module = init_eval_wandb(
+        use_wandb=use_supervised,
+        agent_cfg=agent_cfg,
+        log_dir=log_dir,
+        task_name=args_cli.task or "",
+    )
+    tracking_term = get_tracking_metrics_term(manager_env) if manager_env else None
+    num_envs = env.unwrapped.num_envs
+    eval_logger = (
+        EvalWandbLogger(wandb_run) if wandb_run is not None and tracking_term is not None else None
+    )
+
+    total_env_steps = 0
     timestep = 0
     rollouts_collected = 0
+    progress_bar = tqdm(total=args_cli.num_rollouts, desc="Rollouts collected", unit="rollouts")
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
-            actions = policy(previous_obs)
+            if use_supervised:
+                actions = supervised_helper.act(previous_obs, rollout_storage)
+            else:
+                actions = policy(previous_obs)
             # env stepping
             obs, rewards, dones, _ = env.step(actions)
+            total_env_steps += num_envs
+
+            if eval_logger is not None and tracking_term is not None:
+                eval_logger.log_step(tracking_term, total_env_steps)
+
             policy_obs = previous_obs["policy"]
             if isinstance(previous_obs, Mapping):
                 debug_obs = previous_obs.get("debug")
@@ -303,7 +388,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             rollout_storage.add_step(rollout_obs, actions, rewards, dones)
             # reset recurrent states for episodes that have terminated
             done_mask = dones.to(torch.bool)
-            policy_nn.reset(done_mask)
+            if policy_nn is not None:
+                policy_nn.reset(done_mask)
             if torch.any(done_mask):
                 done_env_ids = torch.nonzero(done_mask, as_tuple=True)[0]
                 rollouts = rollout_storage.get_rollouts(done_env_ids)
@@ -326,7 +412,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     pairs.append({"context": demo_episode, "rollout": rollout_episode})
                 rollout_pair_storage.add_pairs(pairs)
                 rollouts_collected += len(pairs)
+                progress_bar.update(len(pairs))
+
+                if eval_logger is not None:
+                    eval_logger.log_episode_batch(done_env_ids, rollouts, total_env_steps)
+
                 rollout_storage.wipe_envs(done_env_ids)
+                if use_supervised:
+                    supervised_helper.refresh_envs(done_env_ids)
                 _update_demo_snapshot(demo_context, done_env_ids, demo_obs_snapshot, demo_lengths_snapshot)
                 demo_indices[done_env_ids] = demo_context.episode_indices[done_env_ids]
             previous_obs = obs
@@ -345,7 +438,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # close the simulator
     rollout_pair_storage.force_save()
+    progress_bar.close()
     env.close()
+    if eval_logger is not None:
+        eval_logger.finish()
 
 
 if __name__ == "__main__":

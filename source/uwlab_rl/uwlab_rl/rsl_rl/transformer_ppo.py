@@ -103,7 +103,7 @@ class PPOWithLongContext(PPO):
 
         cfg = transformer_optimizer_cfg or getattr(policy, "transformer_optimizer_cfg", None)
         context_encoder = getattr(policy, "context_encoder", None)
-        transformer_only = bool(getattr(policy, "transformer_actor_class_name", None))
+        transformer_only = bool(getattr(policy, "context_token_layout", None))
         use_transformer_optimizer = cfg is not None and (context_encoder is not None or transformer_only)
 
         if use_transformer_optimizer:

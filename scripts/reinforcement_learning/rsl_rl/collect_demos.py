@@ -263,7 +263,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs_shape = from_demo_utils.extract_obs_shape(demo_obs, debug_obs)
     max_steps = getattr(env.unwrapped, "max_episode_length", args_cli.video_length)
     action_space = getattr(env.unwrapped, "single_action_space", env.action_space)
-    action_shape = from_demo_utils.extract_action_shape(action_space)
+    action_shape = from_demo_utils.extract_action_shape(action_space, num_envs=env.unwrapped.num_envs)
     rollout_storage = RolloutStorage(
         num_envs=env.unwrapped.num_envs,
         max_steps=max_steps,
@@ -315,7 +315,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 rollout_obs = demo_obs
             
-            real_actions = env.unwrapped.action_manager.prev_action
+            real_actions = env.unwrapped.action_manager.action
             rollout_storage.add_step(rollout_obs, real_actions, rewards, dones)
             # reset recurrent states for episodes that have terminated
             done_mask = dones.to(torch.bool)

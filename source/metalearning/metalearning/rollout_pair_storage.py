@@ -36,6 +36,7 @@ class RolloutPairStorage:
         self.saved_pairs += len(self.pairs)
         self.pairs = []
         self.save_index += 1
+        print(f"[INFO]: Saved {len(self.pairs)} rollout pairs to {save_path}")
         return save_path
 
     def force_save(self) -> None:

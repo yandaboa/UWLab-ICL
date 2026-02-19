@@ -12,6 +12,9 @@ scripts/reinforcement_learning/rsl_rl/train.py \
     env.scene.insertive_object=peg \
     env.scene.receptive_object=peghole
 
+supervised context training:
+python scripts/reinforcement_learning/rsl_rl/train_supervised_context.py
+
 distillation training:
 scripts/reinforcement_learning/rsl_rl/train.py \
     --task OmniFromDemo-UR5eRobotiq2f85-Distillation-v0 \
@@ -51,6 +54,9 @@ python -m torch.distributed.run \
 
 running evals to see how well something tracks a demo:
 python scripts/reinforcement_learning/rsl_rl/eval_demo_tracking.py --task OmniFromDemo-UR5eRobotiq2f85-Eval-v0 --num_rollouts 50 --num_envs 32 --checkpoint cube_tracking_transformer_actor.pt --headless env.scene.insertive_object=rectangle env.scene.receptive_object=wall
+
+supervised eval:
+python scripts/reinforcement_learning/rsl_rl/eval_demo_tracking.py --task OmniFromDemo-UR5eRobotiq2f85-SupervisedEval-v0 --num_rollouts 16 --num_envs 8 --supervised_context_checkpoint logs/rsl_rl/supervised_context/seed3_hd512_L8_H4/model_070000.pt --supervised_open_loop  --headless env.scene.insertive_object=peg env.scene.receptive_object=peghole
 
 visualizing context + inference rollouts:
 python -m metalearning.tools.visualize_trajectory /path/to/episodes_000000.pt --episode-idx 3

@@ -7,7 +7,7 @@ from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg
 
 from uwlab_rl.rsl_rl.rl_cfg import RslRlFancyTransformerHistoryActorCriticCfg, TransformerOptimizerCfg
-from uwlab_rl.rsl_rl.metaleanring_cfg import RslRlPpoAlgorithmWarmStartCfg, BCFromContextWarmStartCfg
+from uwlab_rl.rsl_rl.metaleanring_cfg import RslRlPpoAlgorithmWarmStartCfg
 from .trajectory_viz_cfg import TrajectoryVizCfg
 
 
@@ -44,8 +44,10 @@ class PPOWithContextRunnerCfg(RslRlOnPolicyRunnerCfg):
         attention_dropout=0.0,
         residual_dropout=0.0,
 
-        transformer_actor_class_name="StateActionTransformerActor",
+        context_token_layout="state_action",
         action_distribution="normal",
+        share_current_and_context_obs_projection=True,
+        encoding_projection_hidden_dim=None,
 
         cross_attention_merge=True,
         obs_token_count=1,

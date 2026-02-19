@@ -130,11 +130,23 @@ class RslRlFancyTransformerHistoryActorCriticCfg(RslRlFancyActorCriticCfg):
     obs_token_count: int = 4
     """The number of obs query tokens for cross-attention."""
 
-    transformer_actor_class_name: str | None = None
-    """Transformer actor class name for transformer-only policy.
+    context_token_layout: str | None = None
+    """Layout for context tokens (e.g., "merged", "state_action", "state_only").
 
-    Valid options: "MergedTokenTransformerActor", "StateActionTransformerActor".
+    This layout determines the transformer actor class internally.
     """
+
+    include_actions_in_context: bool = True
+    """Whether to include action terms in merged context tokens."""
+
+    include_rewards_in_context: bool = True
+    """Whether to include reward terms in merged context tokens."""
+
+    share_current_and_context_obs_projection: bool = False
+    """Reuse one projection for current_obs and context_obs; requires matching feature sizes."""
+
+    encoding_projection_hidden_dim: int | None = None
+    """Optional hidden size for obs encoders (in->hidden->embedding instead of single linear)."""
 
     action_distribution: Literal["normal", "categorical"] = "normal"
     """Action distribution type for the policy."""

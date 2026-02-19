@@ -8,9 +8,11 @@ import torch.nn as nn
 from rsl_rl.networks.mlp import MLP
 
 __all__ = [
+    "ARDiscreteTransformerActor",
     "EpisodeEncoder",
     "MergedTokenTransformerActor",
     "PositionalEncoding",
+    "StateOnlyTransformerActor",
     "StateActionTransformerActor",
     "TransformerActor",
     "TransformerBlock",
@@ -318,9 +320,12 @@ class TransformerActor(nn.Module):
         x: torch.Tensor,
         padding_mask: Optional[torch.Tensor] = None,
         token_indices: Optional[torch.Tensor] = None,
+        return_all_tokens: bool = False,
     ) -> torch.Tensor:
         """Return action means for selected tokens."""
         hidden = self.encoder(x, padding_mask=padding_mask)
+        if return_all_tokens:
+            return self.action_head(hidden)
         hidden = self._select_tokens(hidden, token_indices)
         self._last_hidden = hidden
         self._last_features = self.action_head[:-1](hidden)
@@ -348,7 +353,7 @@ class TransformerActor(nn.Module):
         """Split flat logits into per-action logits."""
         if not self.categorical_actions or self.action_bins is None:
             raise RuntimeError("split_action_logits is only available for categorical actions.")
-        return list(torch.split(logits, self.action_bins, dim=-1))
+        return list(torch.split(logits, list(self.action_bins), dim=-1))
 
     @staticmethod
     def _select_tokens(
@@ -367,5 +372,155 @@ class MergedTokenTransformerActor(TransformerActor):
     """Transformer actor for merged (state, action, reward) tokens."""
 
 
+class StateOnlyTransformerActor(TransformerActor):
+    """Transformer actor for state-only token sequences."""
+
+
 class StateActionTransformerActor(TransformerActor):
     """Transformer actor that expects state/action token sequences."""
+
+
+class ARDiscreteTransformerActor(nn.Module):
+    """Autoregressive discrete actor over action-token bins."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        num_actions: int,
+        num_bins: int,
+        embedding_dim: Optional[int] = None,
+        hidden_dim: int = 256,
+        num_layers: int = 4,
+        num_heads: int = 4,
+        max_len: int = 180,
+        attention_dropout: float = 0.1,
+        residual_dropout: float = 0.0,
+        embedding_dropout: float = 0.1,
+        causal: bool = True,
+    ) -> None:
+        super().__init__()
+        assert num_bins > 1, "num_bins must be greater than 1 for discrete autoregressive actions."
+        self.num_actions = int(num_actions)
+        self.num_bins = int(num_bins)
+        self.encoder = TransformerEncoder(
+            input_dim=input_dim,
+            embedding_dim=embedding_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            max_len=max_len,
+            attention_dropout=attention_dropout,
+            residual_dropout=residual_dropout,
+            embedding_dropout=embedding_dropout,
+            causal=causal,
+        )
+        self.action_token_embedding = nn.Embedding(self.num_bins, input_dim)
+        self.action_head = nn.Linear(hidden_dim, self.num_bins)
+
+    @staticmethod
+    def _gather_positions(hidden: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        batch_idx = torch.arange(hidden.shape[0], device=hidden.device).unsqueeze(1).expand_as(positions)
+        return hidden[batch_idx, positions.to(dtype=torch.long), :]
+
+    def _build_autoregressive_tokens(
+        self,
+        x: torch.Tensor,
+        token_indices: torch.Tensor,
+        action_prefix_tokens: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Insert action-prefix tokens directly after each sample's current_obs token."""
+        batch_size, base_len, token_dim = x.shape
+        prefix_len = 0 if action_prefix_tokens is None else int(action_prefix_tokens.shape[1])
+        full_len = base_len + prefix_len
+        full_tokens = torch.zeros((batch_size, full_len, token_dim), device=x.device, dtype=x.dtype)
+        valid_lens = token_indices.to(dtype=torch.long) + 1
+        base_positions = torch.arange(base_len, device=x.device).unsqueeze(0)
+        valid_base_mask = base_positions < valid_lens.unsqueeze(1)
+        full_tokens[:, :base_len, :] = x * valid_base_mask.unsqueeze(-1).to(dtype=x.dtype)
+        if prefix_len > 0:
+            assert action_prefix_tokens is not None
+            action_prefix_tokens = action_prefix_tokens.to(device=x.device, dtype=x.dtype)
+            prefix_offsets = torch.arange(prefix_len, device=x.device, dtype=torch.long).unsqueeze(0)
+            prefix_positions = valid_lens.unsqueeze(1) + prefix_offsets
+            batch_idx = torch.arange(batch_size, device=x.device).unsqueeze(1).expand_as(prefix_positions)
+            full_tokens[batch_idx, prefix_positions, :] = action_prefix_tokens
+        full_positions = torch.arange(full_len, device=x.device).unsqueeze(0)
+        full_padding_mask = full_positions >= (valid_lens + prefix_len).unsqueeze(1)
+        return full_tokens, full_padding_mask
+
+    def teacher_forcing_logits(
+        self,
+        x: torch.Tensor,
+        target_action_indices: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        token_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Return per-dimension action-bin logits using teacher forcing."""
+        assert token_indices is not None, "token_indices are required for autoregressive discrete training."
+        assert target_action_indices.ndim == 2, "Expected target_action_indices shape (B, num_actions)."
+        assert target_action_indices.shape[1] == self.num_actions, (
+            f"Expected num_actions={self.num_actions}, got {target_action_indices.shape[1]}."
+        )
+        token_indices = token_indices.to(dtype=torch.long)
+        # For AR teacher forcing we condition on ground-truth prefix act_1..act_{n-1}
+        # and predict act_1..act_n from positions [current_obs, act_1, ..., act_{n-1}].
+        prefix_indices = target_action_indices[:, : self.num_actions - 1].to(dtype=torch.long)
+        prefix_tokens = self.action_token_embedding(prefix_indices)
+        full_tokens, full_padding_mask = self._build_autoregressive_tokens(
+            x=x,
+            token_indices=token_indices,
+            action_prefix_tokens=prefix_tokens,
+        )
+        hidden = self.encoder(full_tokens, padding_mask=full_padding_mask)
+        offset = torch.arange(self.num_actions, device=x.device, dtype=torch.long).unsqueeze(0)
+        prediction_positions = token_indices.unsqueeze(1) + offset
+        prediction_hidden = self._gather_positions(hidden, prediction_positions)
+        return self.action_head(prediction_hidden)
+
+    def cross_entropy_loss(
+        self,
+        x: torch.Tensor,
+        target_action_indices: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        token_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute averaged autoregressive cross-entropy over action dimensions."""
+        logits = self.teacher_forcing_logits(
+            x=x,
+            target_action_indices=target_action_indices,
+            padding_mask=padding_mask,
+            token_indices=token_indices,
+        )
+        return nn.functional.cross_entropy(
+            logits.reshape(-1, self.num_bins),
+            target_action_indices.to(dtype=torch.long).reshape(-1),
+            reduction="mean",
+        )
+
+    def act(
+        self,
+        x: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        token_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Autoregressively decode action-bin indices."""
+        assert token_indices is not None, "token_indices are required for autoregressive discrete inference."
+        token_indices = token_indices.to(dtype=torch.long)
+        generated: list[torch.Tensor] = []
+        for action_idx in range(self.num_actions):
+            if generated:
+                action_prefix = torch.stack(generated, dim=1)
+                action_prefix_tokens = self.action_token_embedding(action_prefix)
+            else:
+                action_prefix_tokens = None
+            model_tokens, model_padding_mask = self._build_autoregressive_tokens(
+                x=x,
+                token_indices=token_indices,
+                action_prefix_tokens=action_prefix_tokens,
+            )
+            hidden = self.encoder(model_tokens, padding_mask=model_padding_mask)
+            prediction_pos = (token_indices + action_idx).unsqueeze(1)
+            prediction_hidden = self._gather_positions(hidden, prediction_pos).squeeze(1)
+            logits = self.action_head(prediction_hidden)
+            generated.append(torch.argmax(logits, dim=-1))
+        return torch.stack(generated, dim=-1)

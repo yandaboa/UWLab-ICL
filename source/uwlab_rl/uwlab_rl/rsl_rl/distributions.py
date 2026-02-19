@@ -5,6 +5,8 @@ from typing import Optional, Sequence
 import torch
 from torch.distributions import Distribution, Categorical, constraints
 
+from uwlab_rl.rsl_rl.discrete_action_utils import actions_to_indices
+
 
 class IndependentCategoricalDistribution(Distribution):
     """Independent categorical distributions per action dimension.
@@ -48,7 +50,7 @@ class IndependentCategoricalDistribution(Distribution):
             assert logits.shape == (logits.shape[0], expected), (
                 f"logits must be [B, sum(bins)={expected}], got {tuple(logits.shape)}"
             )
-            splits = torch.split(logits, self.action_bins, dim=-1)
+            splits = torch.split(logits, list(self.action_bins), dim=-1)
         else:
             assert logits.shape[1] == self._K, f"logits must be [B, K={self._K}, max_bins], got {tuple(logits.shape)}"
             assert logits.shape[2] >= max(self.action_bins), (
@@ -151,23 +153,7 @@ class IndependentCategoricalDistribution(Distribution):
     # ---------------- helpers ----------------
 
     def _actions_to_indices(self, actions: torch.Tensor) -> torch.Tensor:
-        # actions is [B,K]
-        if actions.dtype == torch.long:
-            idx = actions
-        else:
-            if self.bin_values is not None:
-                idxs = []
-                for i, values in enumerate(self.bin_values):
-                    v = values.to(device=actions.device, dtype=actions.dtype).view(1, -1)  # [1,bins_i]
-                    a = actions[..., i].unsqueeze(-1)  # [B,1]
-                    idxs.append((a - v).abs().argmin(dim=-1))  # [B]
-                idx = torch.stack(idxs, dim=-1)  # [B,K]
-            else:
-                idx = actions.round().to(torch.long)
-
-        # clamp to valid per-dim range
-        idx_clamped = [idx[..., i].clamp(0, b - 1) for i, b in enumerate(self.action_bins)]
-        return torch.stack(idx_clamped, dim=-1)  # [B,K]
+        return actions_to_indices(actions, self.action_bins, self.bin_values)
 
     def _maybe_map_to_values(self, idx: torch.Tensor) -> torch.Tensor:
         # idx is [B,K] long

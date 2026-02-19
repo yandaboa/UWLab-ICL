@@ -37,8 +37,10 @@ class LongContextStudentTeacherCfg:
         embedding_dropout=0.0,
         attention_dropout=0.0,
         residual_dropout=0.0,
-        transformer_actor_class_name="StateActionTransformerActor",
+        context_token_layout="state_action",
         action_distribution="normal",
+        share_current_and_context_obs_projection=False,
+        encoding_projection_hidden_dim=None,
         cross_attention_merge=True,
         obs_token_count=1,
         max_num_episodes=1,
@@ -83,4 +85,4 @@ class DistillationLongContextRunnerCfg(RslRlOnPolicyRunnerCfg):
         "teacher": ["critic"],
     }
     policy: LongContextStudentTeacherCfg = LongContextStudentTeacherCfg()
-    algorithm: DistillationAlgorithmCfg = DistillationAlgorithmCfg()  # type: ignore[assignment]
+    algorithm: DistillationAlgorithmCfg = DistillationAlgorithmCfg()  # type: ignore[assignment[]]

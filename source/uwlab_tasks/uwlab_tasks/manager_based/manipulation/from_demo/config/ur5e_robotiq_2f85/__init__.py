@@ -51,6 +51,16 @@ gym.register(
 )
 
 gym.register(
+    id="OmniFromDemo-UR5eRobotiq2f85-SupervisedEval-v0",
+    entry_point="uwlab_tasks.manager_based.manipulation.from_demo.env:FromDemoEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.rl_state_cfg:Ur5eRobotiq2f85RelJointPosFromDemoSupervisedEvalCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:PPOWithContextRunnerCfg",
+    },
+)
+
+gym.register(
     id="OmniFromDemo-UR5eRobotiq2f85-PriviledgedEval-v0",
     entry_point="uwlab_tasks.manager_based.manipulation.from_demo.env:FromDemoEnv",
     disable_env_checker=True,

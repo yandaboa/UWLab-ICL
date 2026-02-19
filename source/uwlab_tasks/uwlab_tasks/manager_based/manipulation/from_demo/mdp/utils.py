@@ -137,13 +137,16 @@ def extract_obs_shape(
     return {"demo": demo_obs.shape[1:], **debug_shapes}
 
 
-def extract_action_shape(action_space: Any) -> tuple[int, ...]:
+def extract_action_shape(action_space: Any, num_envs: int | None = None) -> tuple[int, ...]:
     action_shape = getattr(action_space, "shape", None)
     if action_shape is None:
         discrete_n = getattr(action_space, "n", None)
         if discrete_n is not None:
             return (int(discrete_n),)
         raise ValueError("Action space has no shape or discrete size.")
+    action_shape = tuple(int(dim) for dim in action_shape)
+    if num_envs is not None and action_shape and action_shape[0] == num_envs:
+        return action_shape[1:]
     return action_shape
 
 

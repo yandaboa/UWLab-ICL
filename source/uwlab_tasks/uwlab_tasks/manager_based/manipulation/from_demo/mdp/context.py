@@ -28,8 +28,9 @@ __all__ = [
 ]
 
 
-def _huber_saturating(x: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
+def _huber_saturating(x: torch.Tensor, delta: float = 1.0, tolerance: float = 0.01) -> torch.Tensor:
     """Huber loss on nonnegative x. Quadratic near 0, linear past delta."""
+    x = x / tolerance
     return torch.where(x <= delta, 0.5 * x * x, delta * (x - 0.5 * delta))
 
 
@@ -98,7 +99,7 @@ def pose_quat_tracking_reward(
 def tracking_end_effector_reward(
     env: "ManagerBasedRLEnv",
     k: float = 40.0,  # the -40 in the paper
-    tolerance: float = 0.5,
+    tolerance: float = 0.1,
 ) -> torch.Tensor:
     context_term = _get_tracking_context(env)
 
@@ -119,10 +120,11 @@ def tracking_end_effector_reward(
     curr_ee_pos = curr_ee_pose[:, :3]  # [N, 3]
 
     # ||p_hat - p||^2  (squared L2 norm), NOT mean-square
-    sq_dist = torch.sum(((demo_ee_pos - curr_ee_pos)/ tolerance) ** 2, dim=-1)  # [N]
+    # sq_dist = torch.sum(((demo_ee_pos - curr_ee_pos)/ tolerance) ** 2, dim=-1)  # [N]
 
     # exp(-40 * sum_e ||...||^2); with one EE, sum_e is just sq_dist
-    return torch.exp(-k * sq_dist)
+    return -1 *_huber_saturating(demo_ee_pos - curr_ee_pos, delta=1.0).sum(dim=-1)
+    # return torch.exp(-k * sq_dist)
 
 def tracking_action_reward(env: "ManagerBasedRLEnv"):
     context_term = _get_tracking_context(env)

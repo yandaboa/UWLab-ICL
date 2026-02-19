@@ -124,8 +124,8 @@ class DemoTrackingContext:
         for env_id, episode in zip(env_ids.tolist(), selected):
             self.task_states_by_env[env_id] = episode.get("states")
             self.task_physics_by_env[env_id] = episode.get("physics")
-        states = _stack_episode_field([episode["states"] for episode in selected], device=self._env.device)
-        states = _add_state_noise(states, self.state_noise_scale)
+        self.states = _stack_episode_field([episode["states"] for episode in selected], device=self._env.device)
+        self.states = _add_state_noise(self.states, self.state_noise_scale)
         physics = _stack_episode_field([episode["physics"] for episode in selected], device=None)
         physics = _expand_physics_for_envs(
             physics, self._env.num_envs, env_ids, self._physics_zero_cache
@@ -155,13 +155,13 @@ class DemoTrackingContext:
             self.pending_raw_timesteps = torch.tensor(
                 raw_timesteps, device=self._env.device, dtype=self._env.episode_length_buf.dtype
             )
-        elif _is_multi_reset_state(states) and multi_reset_manager is not None:
-            assert "multi_reset_task_id" in states and "multi_reset_state_index" in states
-            task_ids = states["multi_reset_task_id"]
-            state_indices = states["multi_reset_state_index"]
+        elif _is_multi_reset_state(self.states) and multi_reset_manager is not None:
+            assert "multi_reset_task_id" in self.states and "multi_reset_state_index" in self.states
+            task_ids = self.states["multi_reset_task_id"]
+            state_indices = self.states["multi_reset_state_index"]
             multi_reset_manager.load_saved_states(env_ids, state_indices, task_ids=task_ids)
         else:
-            self._env.scene.reset_to(states, env_ids=env_ids, is_relative=True)  # type: ignore[arg-type]
+            self._env.scene.reset_to(self.states, env_ids=env_ids, is_relative=True)  # type: ignore[arg-type]
         utils.apply_physics_for_envs(self._env, env_ids, physics)
 
     def _assign_demo_obs(

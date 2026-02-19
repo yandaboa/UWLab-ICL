@@ -1,9 +1,10 @@
 import functools
 import math
+from typing import Any
 
 import torch
 
-__all__ = ["cosine_annealing_with_warmup", "linear_warmup"]
+__all__ = ["cosine_annealing_with_warmup", "linear_warmup", "build_lr_scheduler"]
 
 
 # source:  https://gist.github.com/akshaychawla/86d938bc6346cf535dce766c83f743ce
@@ -46,3 +47,25 @@ def linear_warmup(optimizer, warmup_steps):
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _decay_func)
     return scheduler
+
+
+def build_lr_scheduler(cfg: Any, optimizer: torch.optim.Optimizer):
+    schedule_name = getattr(cfg, "lr_schedule", None) if not isinstance(cfg, dict) else cfg.get("lr_schedule")
+    if not schedule_name:
+        return None
+    warmup_steps = getattr(cfg, "lr_warmup_steps", 0) if not isinstance(cfg, dict) else cfg.get("lr_warmup_steps", 0)
+    schedule_map = {
+        "cosine_annealing_with_warmup": cosine_annealing_with_warmup,
+        "linear_warmup": linear_warmup,
+    }
+    if schedule_name not in schedule_map:
+        raise ValueError(f"Unknown lr_schedule: {schedule_name}")
+    schedule_fn = schedule_map[schedule_name]
+    if schedule_name == "cosine_annealing_with_warmup":
+        total_steps = getattr(cfg, "num_steps", None) if not isinstance(cfg, dict) else cfg.get("num_steps")
+        if total_steps is None:
+            raise ValueError("num_steps must be set for cosine_annealing_with_warmup.")
+        if total_steps <= warmup_steps:
+            raise ValueError("num_steps must be greater than lr_warmup_steps for cosine_annealing_with_warmup.")
+        return schedule_fn(optimizer, warmup_steps, int(total_steps))
+    return schedule_fn(optimizer, int(warmup_steps))
