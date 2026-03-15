@@ -50,6 +50,22 @@ python scripts/reinforcement_learning/rsl_rl/train.py \
 python scripts/reinforcement_learning/rsl_rl/train_supervised_context.py
 ```
 
+### Supervised policy training + eval
+```bash
+python scripts/reinforcement_learning/rsl_rl/train_supervised.py --config scripts/reinforcement_learning/rsl_rl/configs/train_supervised.yaml
+```
+
+```bash
+python scripts/reinforcement_learning/rsl_rl/eval_supervised.py \
+    --headless \
+    --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0 \
+    --num_envs 1024 \
+    --checkpoint <ckpt.pt> \
+    env.scene.insertive_object=peg \
+    env.scene.receptive_object=peghole
+```
+
+
 ### Forward dynamics (residual) training
 
 Uses `scripts/reinforcement_learning/rsl_rl/train_forward_dynamics.py` to learn:

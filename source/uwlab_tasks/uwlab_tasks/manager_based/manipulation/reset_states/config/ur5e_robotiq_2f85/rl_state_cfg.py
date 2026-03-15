@@ -117,8 +117,10 @@ class BaseEventCfg:
         func=omni_reset_mdp.randomize_rigid_body_material,  # type: ignore
         mode="startup",
         params={
-            "static_friction_range": (0.3, 1.2),
-            "dynamic_friction_range": (0.2, 1.0),
+            # "static_friction_range": (0.3, 1.2),
+            "static_friction_range": (0.75, 0.75),
+            "dynamic_friction_range": (0.6, 0.6),
+            # "dynamic_friction_range": (0.2, 1.0),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("robot"),
@@ -131,10 +133,10 @@ class BaseEventCfg:
         func=omni_reset_mdp.randomize_rigid_body_material,  # type: ignore
         mode="startup",
         params={
-            "static_friction_range": (4.0, 6.0),
-            "dynamic_friction_range": (2.0, 3.0),
             # "static_friction_range": (1.0, 2.0),
+            "static_friction_range": (1.5, 1.5),
             # "dynamic_friction_range": (0.9, 1.9),
+            "dynamic_friction_range": (1.4, 1.4),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("insertive_object"),
@@ -147,8 +149,10 @@ class BaseEventCfg:
         func=omni_reset_mdp.randomize_rigid_body_material,  # type: ignore
         mode="startup",
         params={
-            "static_friction_range": (1.0, 2.0),
-            "dynamic_friction_range": (0.9, 1.9),
+            # "static_friction_range": (1.0, 2.0),
+            "static_friction_range": (1.5, 1.5),
+            # "dynamic_friction_range": (0.9, 1.9),
+            "dynamic_friction_range": (1.4, 1.4),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("receptive_object"),
@@ -160,8 +164,10 @@ class BaseEventCfg:
         func=omni_reset_mdp.randomize_rigid_body_material,  # type: ignore
         mode="startup",
         params={
-            "static_friction_range": (0.3, 0.6),
-            "dynamic_friction_range": (0.2, 0.5),
+            # "static_friction_range": (0.3, 0.6),
+            "static_friction_range": (0.45, 0.45),
+            # "dynamic_friction_range": (0.2, 0.5),
+            "dynamic_friction_range": (0.35, 0.35),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("table"),
@@ -174,7 +180,8 @@ class BaseEventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "mass_distribution_params": (0.7, 1.3),
+            "mass_distribution_params": (1.0, 1.0),
+            # "mass_distribution_params": (0.7, 1.3),
             "operation": "scale",
             "distribution": "uniform",
             "recompute_inertia": True,
@@ -187,8 +194,8 @@ class BaseEventCfg:
         params={
             "asset_cfg": SceneEntityCfg("insertive_object"),
             # we assume insertive object is somewhere between 20g and 200g
-            "mass_distribution_params": (0.5, 1.0),
             # "mass_distribution_params": (0.02, 0.2),
+            "mass_distribution_params": (0.11, 0.11),
             "operation": "abs",
             "distribution": "uniform",
             "recompute_inertia": True,
@@ -200,7 +207,8 @@ class BaseEventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("receptive_object"),
-            "mass_distribution_params": (0.5, 1.5),
+            "mass_distribution_params": (0.75, 0.75),
+            # "mass_distribution_params": (0.5, 1.5),
             "operation": "scale",
             "distribution": "uniform",
             "recompute_inertia": True,
@@ -212,7 +220,8 @@ class BaseEventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("table"),
-            "mass_distribution_params": (0.5, 1.5),
+            "mass_distribution_params": (0.75, 0.75),
+            # "mass_distribution_params": (0.5, 1.5),
             "operation": "scale",
             "distribution": "uniform",
             "recompute_inertia": True,
@@ -224,8 +233,10 @@ class BaseEventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=["shoulder.*", "elbow.*", "wrist.*", "finger_joint"]),
-            "friction_distribution_params": (0.25, 4.0),
-            "armature_distribution_params": (0.25, 4.0),
+            # "friction_distribution_params": (0.25, 4.0),
+            "friction_distribution_params": (0.325, 0.325),
+            # "armature_distribution_params": (0.25, 4.0),
+            "armature_distribution_params": (0.325, 0.325),
             "operation": "scale",
             "distribution": "log_uniform",
         },
@@ -236,8 +247,10 @@ class BaseEventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=["finger_joint"]),
-            "stiffness_distribution_params": (0.5, 2.0),
-            "damping_distribution_params": (0.5, 2.0),
+            # "stiffness_distribution_params": (0.5, 2.0),
+            "stiffness_distribution_params": (1.25, 1.25),
+            # "damping_distribution_params": (0.5, 2.0),
+            "damping_distribution_params": (1.25, 1.25),
             "operation": "scale",
             "distribution": "log_uniform",
         },
@@ -281,7 +294,7 @@ class EvalEventCfg(BaseEventCfg):
             ],
             "probs": [1.0],
             "success": "env.reward_manager.get_term_cfg('progress_context').func.success",
-            "reset_to_same_state": True,
+            "reset_to_same_state": False,
         },
     )
 
@@ -691,8 +704,10 @@ class Ur5eRobotiq2f85RelCartesianOSCEvalCfg(Ur5eRobotiq2f85RlStateCfg):
             mode="reset",
             params={
                 "action_name": "arm",
-                "stiffness_distribution_params": (0.7, 1.3),
-                "damping_distribution_params": (0.9, 1.1),
+                # "stiffness_distribution_params": (0.7, 1.3),
+                "stiffness_distribution_params": (0.95, 1.05),
+                # "damping_distribution_params": (0.9, 1.1),
+                "damping_distribution_params": (1.0, 1.0),
                 "operation": "scale",
                 "distribution": "uniform",
             },

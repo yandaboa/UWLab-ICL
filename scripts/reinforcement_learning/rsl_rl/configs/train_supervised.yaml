@@ -1,8 +1,8 @@
 dataset:
-  path: /home/ubuntu/lti/UWLab-ICL/supervised_dataset.pt
+  path: /home/ubuntu/lti/UWLab-ICL/50k_supervised_dataset_s_phys_rnge.pt
 
 model:
-  hidden_dims: [1024, 512, 256, 128, 64]
+  hidden_dims: [1024, 1024, 1024, 512, 256]
   loss_type: gaussian_nll
   normalize_action_targets: true
   action_norm_min_std: 1.0e-6
@@ -12,7 +12,7 @@ model:
 training:
   output_dir: logs/rsl_rl/supervised
   learning_rate: 3e-4
-  weight_decay: 0.0
+  weight_decay: 1e-4
   batch_size: 2048
   epochs: 300
   val_split: 0.1
@@ -22,4 +22,4 @@ training:
   save_last: true
   use_wandb: true
   wandb_project: supervised_gaussian_policy
-  wandb_run_name: first
+  wandb_run_name: limited_physics_params

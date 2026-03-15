@@ -207,6 +207,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
+    if args_cli.collect_dataset:
+        policy = runner.alg.policy.act
 
     # extract the neural network module
     # we do this in a try-except to maintain backwards compatibility.

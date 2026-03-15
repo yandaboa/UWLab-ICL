@@ -72,7 +72,7 @@ import gymnasium as gym
 import math
 import os
 import time
-from typing import Mapping, cast
+from typing import Any, Mapping, cast
 import torch
 from tqdm import tqdm
 
@@ -116,6 +116,50 @@ def _flatten_debug_obs(debug_obs: object) -> dict[str, torch.Tensor]:
     if isinstance(debug_obs, torch.Tensor):
         return {"debug": debug_obs}
     return {}
+
+
+def _get_agent_cfg_value(agent_cfg: Any, key: str, default: Any = None) -> Any:
+    if isinstance(agent_cfg, Mapping):
+        return agent_cfg.get(key, default)
+    return getattr(agent_cfg, key, default)
+
+
+def _extract_noise_cfg(agent_cfg: Any) -> Any:
+    noise_cfg = _get_agent_cfg_value(agent_cfg, "noise")
+    if noise_cfg is not None and hasattr(noise_cfg, "to_dict"):
+        return noise_cfg.to_dict()
+    return noise_cfg
+
+
+def _extract_collection_settings(agent_cfg: Any) -> tuple[int | None, float, bool, float, bool]:
+    raw_num_similar_trajectories = _get_agent_cfg_value(agent_cfg, "num_similar_trajectories")
+    num_similar_trajectories: int | None = None
+    if raw_num_similar_trajectories is not None:
+        parsed_num_similar_trajectories = int(raw_num_similar_trajectories)
+        assert parsed_num_similar_trajectories > 0, "num_similar_trajectories must be > 0."
+        if parsed_num_similar_trajectories > 1:
+            num_similar_trajectories = parsed_num_similar_trajectories
+
+    raw_action_noise_variance = _get_agent_cfg_value(agent_cfg, "action_noise_variance", 0.0)
+    action_noise_variance = float(raw_action_noise_variance) if raw_action_noise_variance is not None else 0.0
+    assert action_noise_variance >= 0.0, "action_noise_variance must be >= 0."
+    action_noise_std = math.sqrt(action_noise_variance)
+
+    only_collect_successful_episodes = bool(
+        _get_agent_cfg_value(agent_cfg, "only_collect_successful_episodes", False)
+    )
+    raw_success_reward_threshold = _get_agent_cfg_value(agent_cfg, "success_reward_threshold", 0.1)
+    success_reward_threshold = (
+        float(raw_success_reward_threshold) if raw_success_reward_threshold is not None else 0.1
+    )
+    sample_action = bool(_get_agent_cfg_value(agent_cfg, "sample_action", False))
+    return (
+        num_similar_trajectories,
+        action_noise_std,
+        only_collect_successful_episodes,
+        success_reward_threshold,
+        sample_action,
+    )
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -182,14 +226,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
     environment_noise = None
-    noise_cfg = None
-    if isinstance(agent_cfg, dict):
-        noise_cfg = agent_cfg.get("noise")
-    else:
-        noise_cfg = getattr(agent_cfg, "noise", None)
+    noise_cfg = _extract_noise_cfg(agent_cfg)
     if noise_cfg is not None:
-        if hasattr(noise_cfg, "to_dict"):
-            noise_cfg = noise_cfg.to_dict()
         environment_noise = EnvironmentNoise(
             noise_cfg,
             num_envs=env.unwrapped.num_envs,
@@ -231,8 +269,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     runner.load(resume_path)
 
+    (
+        num_similar_trajectories,
+        action_noise_std,
+        only_collect_successful_episodes,
+        success_reward_threshold,
+        sample_action,
+    ) = _extract_collection_settings(agent_cfg)
+
     # obtain the trained policy for inference
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
+    if sample_action:
+        runner.eval_mode()
+        runner.alg.policy.to(env.unwrapped.device)
+        policy = runner.alg.policy.act
+    else:    
+        policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     # extract the neural network module
     # we do this in a try-except to maintain backwards compatibility.
@@ -275,25 +326,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         action_shape=action_shape,
         device=env.unwrapped.device,
     )
-    raw_num_similar_trajectories = (
-        agent_cfg.get("num_similar_trajectories")
-        if isinstance(agent_cfg, dict)
-        else getattr(agent_cfg, "num_similar_trajectories", None)
-    )
-    num_similar_trajectories: int | None = None
-    if raw_num_similar_trajectories is not None:
-        parsed_num_similar_trajectories = int(raw_num_similar_trajectories)
-        assert parsed_num_similar_trajectories > 0, "num_similar_trajectories must be > 0."
-        if parsed_num_similar_trajectories > 1:
-            num_similar_trajectories = parsed_num_similar_trajectories
-    raw_action_noise_variance = (
-        agent_cfg.get("action_noise_variance")
-        if isinstance(agent_cfg, dict)
-        else getattr(agent_cfg, "action_noise_variance", 0.0)
-    )
-    action_noise_variance = float(raw_action_noise_variance) if raw_action_noise_variance is not None else 0.0
-    assert action_noise_variance >= 0.0, "action_noise_variance must be >= 0."
-    action_noise_std = math.sqrt(action_noise_variance)
     episode_storage = EpisodeStorage(
         max_num_episodes=args_cli.max_demos_before_saving,
         save_dir=episodes_dir,
@@ -323,6 +355,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     success_term_name = from_demo_utils.find_success_term_name(manager_env)
     last_episode_count = 0
     global_step = 0
+    successful_episodes = 0
+    total_episodes = 0
     all_demos_collected = False
     # simulate environment
     while simulation_app.is_running():
@@ -357,35 +391,42 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             policy_nn.reset(done_mask)
             if torch.any(done_mask):
                 done_env_ids = torch.nonzero(done_mask, as_tuple=True)[0]
-                if num_similar_trajectories is not None:
+                done_success_flags = rewards[done_env_ids] > success_reward_threshold
+                total_episodes += done_env_ids.numel()
+                successful_episodes += int(done_success_flags.sum())
+                if only_collect_successful_episodes:
+                    collected_env_ids = done_env_ids[done_success_flags]
+                    collected_success_flags = torch.ones(
+                        (collected_env_ids.numel(),), dtype=torch.bool, device=done_success_flags.device
+                    )
+                else:
+                    collected_env_ids = done_env_ids
+                    collected_success_flags = done_success_flags
+
+                if num_similar_trajectories is not None and collected_env_ids.numel() > 0:
                     num_collected_episodes = getattr(manager_env, "num_collected_episodes", None)
                     assert isinstance(
                         num_collected_episodes, torch.Tensor
                     ), "Expected env.num_collected_episodes to be a tensor."
-                    num_collected_episodes[done_env_ids] = (
-                        num_collected_episodes[done_env_ids] + 1
+                    num_collected_episodes[collected_env_ids] = (
+                        num_collected_episodes[collected_env_ids] + 1
                     ) % num_similar_trajectories
-                rollouts = rollout_storage.get_rollouts(done_env_ids)
-                states, physics = state_storage.fetch(done_env_ids)
-                rollouts["states"] = states
-                rollouts["physics"] = physics
-                first_success = getattr(manager_env, "first_success", None)
-                if first_success is None:
-                    success_flags = torch.zeros(
-                        (done_env_ids.numel(),), dtype=torch.bool, device=manager_env.device
+
+                if collected_env_ids.numel() > 0:
+                    rollouts = rollout_storage.get_rollouts(collected_env_ids)
+                    states, physics = state_storage.fetch(collected_env_ids)
+                    rollouts["states"] = states
+                    rollouts["physics"] = physics
+                    rollouts["success"] = collected_success_flags
+                    if args_cli.save_raw_states:
+                        rollouts["raw_states"] = state_storage.fetch_raw_states(collected_env_ids)  # type: ignore[assignment]
+                    episode_storage.add_episode(rollouts, env_ids=collected_env_ids)
+                    episode_returns, episode_success = from_demo_utils.collect_episode_metrics(
+                        rollouts, collected_env_ids, manager_env, success_term_name
                     )
-                else:
-                    assert isinstance(first_success, torch.Tensor), "Expected env.first_success to be a Tensor."
-                    success_flags = first_success[done_env_ids] != -1
-                rollouts["success"] = success_flags
-                if args_cli.save_raw_states:
-                    rollouts["raw_states"] = state_storage.fetch_raw_states(done_env_ids)  # type: ignore[assignment]
-                episode_storage.add_episode(rollouts, env_ids=done_env_ids)
-                episode_returns, episode_success = from_demo_utils.collect_episode_metrics(
-                    rollouts, done_env_ids, manager_env, success_term_name
-                )
-                episode_lengths = rollouts["lengths"].detach().cpu().tolist()
-                episode_logger.log(episode_returns, episode_success, global_step, episode_lengths=episode_lengths)
+                    rollout_lengths = cast(torch.Tensor, rollouts["lengths"])
+                    episode_lengths = rollout_lengths.detach().cpu().tolist()
+                    episode_logger.log(episode_returns, episode_success, global_step, episode_lengths=episode_lengths)
                 new_episode_count = episode_storage.total_episodes
                 if new_episode_count > last_episode_count:
                     remaining = args_cli.num_demos - progress_bar.n
@@ -417,6 +458,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     episode_logger.flush(global_step)
     noise_logger.finish()
 
+    print(f"[INFO] Collected {successful_episodes} successful episodes out of {total_episodes} total episodes.")
+    print(f"[INFO] Success rate: {successful_episodes / total_episodes}")
 
 if __name__ == "__main__":
     # run the main function

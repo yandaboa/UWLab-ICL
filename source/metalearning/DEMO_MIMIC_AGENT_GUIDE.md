@@ -36,6 +36,7 @@ flowchart LR
   - checkpoint (`--checkpoint` or `--use_pretrained_checkpoint`)
   - number of demos (`--num_demos`, `--max_demos_before_saving`)
   - optional raw-state capture (`--save_raw_states`, `--state_capture_interval`)
+  - optional success-only filtering via agent cfg (`only_collect_successful_episodes=True`, `success_reward_threshold=<float>`)
 - Main outputs:
   - episodes in `logs/rsl_rl/<experiment>/<run>/episodes/<timestamp>/episodes_*.pt`
   - optional `action_discretization_spec.json` near saved episodes when discrete wrapper is enabled

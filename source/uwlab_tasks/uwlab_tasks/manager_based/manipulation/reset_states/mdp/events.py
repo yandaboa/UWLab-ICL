@@ -1154,8 +1154,9 @@ class MultiResetManager(ManagerTermBase):
                         0, self.num_states[dataset_idx], (len(current_env_ids),), device=self._env.device
                     )
                     self.state_id[current_env_ids] = state_indices
-            else:
+                    current_state_indices = state_indices
                 states_to_reset_from = sample_from_nested_dict(self.datasets[dataset_idx], state_indices)
+            else:
                 current_state_indices = self.last_state_indices[current_env_ids].clone()
                 current_should_resample = should_resample[mask]
                 if torch.any(current_should_resample):
@@ -1164,6 +1165,7 @@ class MultiResetManager(ManagerTermBase):
                 self.last_state_indices[current_env_ids] = current_state_indices
                 self._has_cached_state[current_env_ids] = True
                 states_to_reset_from = sample_from_nested_dict(self.datasets[dataset_idx], current_state_indices)
+            
             self._env.scene.reset_to(states_to_reset_from["initial_state"], env_ids=current_env_ids, is_relative=True)
         
         self.first_reset = False

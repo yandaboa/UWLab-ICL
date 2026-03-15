@@ -19,9 +19,13 @@ class CollectDemosPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 40000
     save_interval = 100
     resume = False
-    num_similar_trajectories: int | None = 8
+    num_similar_trajectories: int | None = 64
+    only_collect_successful_episodes: bool = True
+    success_reward_threshold: float = 0.1
+
     # Action noise added during demo collection: action = act_inference(obs) + N(0, variance).
-    action_noise_variance: float = 0.5
+    action_noise_variance: float = 0.0
+    sample_action: bool = True
     experiment_name = "ur5e_robotiq_2f85_from_demo_collect_demos"
     logger = "wandb"
     policy = RslRlFancyActorCriticCfg(
@@ -52,7 +56,7 @@ class CollectDemosPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     noise: EnvironmentNoiseCfg = EnvironmentNoiseCfg(
         noise_object="noise_receptive",
         constant_noise=True,
-        bernoulli_noise_prob=0.5,
+        bernoulli_noise_prob=0.0,
         noise_frequency_distribution="bernoulli",
         noise_magnitude_distribution="uniform",
         max_noise_frequency = 1.0,
