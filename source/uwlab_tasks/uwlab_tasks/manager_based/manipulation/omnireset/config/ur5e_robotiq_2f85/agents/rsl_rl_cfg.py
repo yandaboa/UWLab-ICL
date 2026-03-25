@@ -81,3 +81,43 @@ class Base_DAggerRunnerCfg(Base_PPORunnerCfg):
             )
         ),
     )
+
+@configclass
+class Base_BCPPORunnerCfg(Base_PPORunnerCfg):
+    max_iterations = 1000
+    policy = RslRlFancyActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=True,
+        critic_obs_normalization=True,
+        actor_hidden_dims=[512, 256, 128, 64],
+        critic_hidden_dims=[512, 256, 128, 64],
+        activation="elu",
+        noise_std_type="gsde",
+        state_dependent_std=False,
+    )
+    algorithm = RslRlFancyPpoAlgorithmCfg(
+        class_name="BCPPO",
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        normalize_advantage_per_mini_batch=False,
+        clip_param=0.2,
+        entropy_coef=0.006,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+        behavior_cloning_cfg=BehaviorCloningCfg(
+            experts_path=["logs/exported/policy.pt"],
+            experts_loader="torch.jit.load",
+            experts_observation_group_cfg="octilab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.rl_state_cfg:ObservationsCfg.PolicyCfg",
+            experts_observation_func=my_experts_observation_func,
+            experts_action_group_cfg="octilab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.actions:Ur5eRobotiq2f85RelativeOSCEvalAction",
+            cloning_loss_coeff=1.0,
+            loss_decay=0.9999,
+            learn_std=True
+        )
+    )

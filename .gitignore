@@ -66,6 +66,13 @@ _build
 # Teleop Recorded Dataset
 /datasets/
 
+# Misc yanda stuff
+rollouts/
+episodes/
+checkpoints/
+renders/
+*.pt
+
 # Tests
 tests/
 
