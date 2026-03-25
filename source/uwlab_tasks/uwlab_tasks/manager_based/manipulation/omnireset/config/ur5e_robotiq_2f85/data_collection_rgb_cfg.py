@@ -623,7 +623,7 @@ class Ur5eRobotiq2f85RGBRelCartesianOSCEvalCfg(Ur5eRobotiq2f85RlStateCfg):
 
         # Render settings
         self.sim.render.enable_dlssg = False
-        self.sim.render.enable_ambient_occlusion = True
+        self.sim.render.enable_ambient_occlusion = False
         self.sim.render.enable_reflections = True
         self.sim.render.enable_dl_denoiser = True
         self.sim.render.antialiasing_mode = "DLAA"
