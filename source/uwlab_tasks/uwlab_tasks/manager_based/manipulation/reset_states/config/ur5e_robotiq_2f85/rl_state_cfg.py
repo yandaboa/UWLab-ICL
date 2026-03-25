@@ -289,12 +289,13 @@ class EvalEventCfg(BaseEventCfg):
         mode="reset",
         params={
             "base_paths": [
-                f"reset_state_datasets/ObjectAnywhereEEAnywhere",
+                f"reset_state_datasets/ObjectAnywhereEEAnywhereUnfiltered",
                 # f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/Resets/ObjectPairs/ObjectAnywhereEEAnywhere",
             ],
             "probs": [1.0],
             "success": "env.reward_manager.get_term_cfg('progress_context').func.success",
             "reset_to_same_state": False,
+            "state_indices_override": [],
         },
     )
 
@@ -802,7 +803,7 @@ class Ur5eRobotiq2f85RelCartesianOSCEvalCfg(Ur5eRobotiq2f85RlStateCfg):
             params={
                 "action_name": "arm",
                 # "stiffness_distribution_params": (0.7, 1.3),
-                "stiffness_distribution_params": (0.95, 1.05),
+                "stiffness_distribution_params": (1.0, 1.0),
                 # "damping_distribution_params": (0.9, 1.1),
                 "damping_distribution_params": (1.0, 1.0),
                 "operation": "scale",

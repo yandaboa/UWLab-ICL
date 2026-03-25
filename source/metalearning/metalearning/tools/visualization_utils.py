@@ -3,12 +3,146 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+
+_POSES_IN_END_EFFECTOR_FRAME = {
+    "insertive_asset_pose",
+    "receptive_asset_pose",
+    "debug/insertive_asset_pose",
+    "debug/receptive_asset_pose",
+}
+
+
+def _skew_matrix(v: torch.Tensor) -> torch.Tensor:
+    zeros = torch.zeros_like(v[..., 0])
+    return torch.stack(
+        (
+            torch.stack((zeros, -v[..., 2], v[..., 1]), dim=-1),
+            torch.stack((v[..., 2], zeros, -v[..., 0]), dim=-1),
+            torch.stack((-v[..., 1], v[..., 0], zeros), dim=-1),
+        ),
+        dim=-2,
+    )
+
+
+def _axis_angle_to_matrix(axis_angle: torch.Tensor) -> torch.Tensor:
+    if axis_angle.shape[-1] != 3:
+        raise ValueError(f"Expected axis-angle with last dim 3, got {tuple(axis_angle.shape)}")
+    theta = torch.linalg.norm(axis_angle, dim=-1, keepdim=True)
+    theta_safe = torch.clamp(theta, min=1.0e-8)
+    axis = axis_angle / theta_safe
+    k = _skew_matrix(axis)
+    eye = torch.eye(3, device=axis_angle.device, dtype=axis_angle.dtype).expand(*axis_angle.shape[:-1], 3, 3)
+    sin_term = torch.sin(theta)[..., None] * k
+    cos_term = (1.0 - torch.cos(theta))[..., None] * (k @ k)
+    return eye + sin_term + cos_term
+
+
+def _matrix_to_axis_angle(rotation: torch.Tensor) -> torch.Tensor:
+    if rotation.shape[-2:] != (3, 3):
+        raise ValueError(f"Expected rotation matrix shape (...,3,3), got {tuple(rotation.shape)}")
+    trace = rotation[..., 0, 0] + rotation[..., 1, 1] + rotation[..., 2, 2]
+    cos_theta = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0)
+    theta = torch.acos(cos_theta)
+    sin_theta = torch.sin(theta)
+    vee = torch.stack(
+        (
+            rotation[..., 2, 1] - rotation[..., 1, 2],
+            rotation[..., 0, 2] - rotation[..., 2, 0],
+            rotation[..., 1, 0] - rotation[..., 0, 1],
+        ),
+        dim=-1,
+    )
+    axis = vee / (2.0 * sin_theta[..., None].clamp(min=1.0e-8))
+    axis_angle = axis * theta[..., None]
+    small = theta < 1.0e-6
+    if torch.any(small):
+        # First-order approximation around zero rotation.
+        axis_angle_small = 0.5 * vee
+        axis_angle = torch.where(small[..., None], axis_angle_small, axis_angle)
+    return axis_angle
+
+
+def _compose_axis_angle_pose(pose_ab: torch.Tensor, pose_bc: torch.Tensor) -> torch.Tensor:
+    if pose_ab.ndim != 2 or pose_bc.ndim != 2:
+        raise ValueError("Expected 2D pose tensors [T, D].")
+    if pose_ab.shape[0] != pose_bc.shape[0]:
+        raise ValueError(f"Pose length mismatch: {pose_ab.shape[0]} vs {pose_bc.shape[0]}")
+    if pose_ab.shape[1] < 6 or pose_bc.shape[1] < 6:
+        raise ValueError(f"Expected pose dims >= 6, got {pose_ab.shape[1]} and {pose_bc.shape[1]}")
+    t_ab = pose_ab[:, :3]
+    aa_ab = pose_ab[:, 3:6]
+    t_bc = pose_bc[:, :3]
+    aa_bc = pose_bc[:, 3:6]
+
+    r_ab = _axis_angle_to_matrix(aa_ab)
+    r_bc = _axis_angle_to_matrix(aa_bc)
+    r_ac = r_ab @ r_bc
+    t_ac = t_ab + torch.matmul(r_ab, t_bc.unsqueeze(-1)).squeeze(-1)
+    aa_ac = _matrix_to_axis_angle(r_ac)
+
+    out = pose_bc.clone()
+    out[:, :3] = t_ac
+    out[:, 3:6] = aa_ac
+    return out
+
+
+def _invert_axis_angle_pose(pose_ab: torch.Tensor) -> torch.Tensor:
+    if pose_ab.ndim != 2:
+        raise ValueError("Expected 2D pose tensor [T, D].")
+    if pose_ab.shape[1] < 6:
+        raise ValueError(f"Expected pose dim >= 6, got {pose_ab.shape[1]}")
+    t_ab = pose_ab[:, :3]
+    aa_ab = pose_ab[:, 3:6]
+    r_ab = _axis_angle_to_matrix(aa_ab)
+    r_ba = torch.transpose(r_ab, -1, -2)
+    t_ba = -torch.matmul(r_ba, t_ab.unsqueeze(-1)).squeeze(-1)
+    aa_ba = _matrix_to_axis_angle(r_ba)
+    out = pose_ab.clone()
+    out[:, :3] = t_ba
+    out[:, 3:6] = aa_ba
+    return out
+
+
+def _resolve_pose_in_robot_base(
+    obs: torch.Tensor | Mapping[str, Any],
+    pose: torch.Tensor,
+    resolved_key: str,
+) -> Tuple[torch.Tensor, str]:
+    if not isinstance(obs, Mapping):
+        return pose, resolved_key
+    if resolved_key not in _POSES_IN_END_EFFECTOR_FRAME:
+        return pose, resolved_key
+
+    # Receptive pose is observed w.r.t. robotiq_base_link (without gripper metadata offset),
+    # while end_effector_pose uses metadata offsets. To avoid mixing these roots, reconstruct
+    # receptive pose in the same frame as insertive pose:
+    #   T_ee_receptive = T_ee_insertive * inv(T_receptive_insertive)
+    # then map to base with end_effector_pose.
+    if resolved_key in {"receptive_asset_pose", "debug/receptive_asset_pose"}:
+        try:
+            insertive_in_ee, insertive_ee_key = get_named_pose_obs(obs, "insertive_asset_pose")
+            insertive_in_receptive, ins_rec_key = get_named_pose_obs(obs, "insertive_asset_in_receptive_asset_frame")
+            receptive_in_insertive = _invert_axis_angle_pose(insertive_in_receptive)
+            receptive_in_ee = _compose_axis_angle_pose(insertive_in_ee, receptive_in_insertive)
+            ee_pose, ee_key = get_named_pose_obs(obs, "end_effector_pose")
+            transformed = _compose_axis_angle_pose(ee_pose, receptive_in_ee)
+            return (
+                transformed,
+                f"{resolved_key}_in_robot_base(via_{ee_key}+{insertive_ee_key}+{ins_rec_key})",
+            )
+        except (KeyError, ValueError, TypeError):
+            # Fallback when triangulation terms are unavailable.
+            return pose, f"{resolved_key}_untransformed(frame_mismatch)"
+
+    ee_pose, ee_key = get_named_pose_obs(obs, "end_effector_pose")
+    transformed = _compose_axis_angle_pose(ee_pose, pose)
+    return transformed, f"{resolved_key}_in_robot_base(via_{ee_key})"
 
 
 def load_episodes(path: Path) -> list[dict[str, Any]]:
@@ -98,6 +232,45 @@ def get_pose_obs(
     if not isinstance(obs, torch.Tensor):
         raise TypeError("obs is not a tensor.")
     return obs, "obs"
+
+
+def get_named_pose_obs(
+    obs: torch.Tensor | Mapping[str, Any], pose_key: str
+) -> Tuple[torch.Tensor, str]:
+    """Resolve a named pose key, trying both base and debug/ variants."""
+    if isinstance(obs, Mapping):
+        if pose_key.startswith("debug/"):
+            base_key = pose_key[len("debug/") :]
+            candidates = [pose_key, base_key]
+        else:
+            candidates = [pose_key, f"debug/{pose_key}"]
+        for candidate in candidates:
+            if candidate not in obs:
+                continue
+            value = obs[candidate]
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"obs key '{candidate}' is not a tensor.")
+            return value, candidate
+        raise KeyError(f"None of the pose keys were found: {candidates}")
+    if not isinstance(obs, torch.Tensor):
+        raise TypeError("obs is not a tensor.")
+    if pose_key in {"obs", "end_effector_pose", "debug/end_effector_pose"}:
+        return obs, "obs"
+    raise KeyError(f"Cannot resolve pose key '{pose_key}' when obs is a raw tensor.")
+
+
+def get_pose_obs_multi(
+    obs: torch.Tensor | Mapping[str, Any], obs_keys: Sequence[str]
+) -> list[Tuple[torch.Tensor, str]]:
+    """Resolve one or more pose keys to tensors and their concrete resolved keys."""
+    if len(obs_keys) == 0:
+        return [get_pose_obs(obs, None)]
+    resolved: list[Tuple[torch.Tensor, str]] = []
+    for key in obs_keys:
+        pose, resolved_key = get_named_pose_obs(obs, key)
+        pose_in_base, resolved_key_in_base = _resolve_pose_in_robot_base(obs, pose, resolved_key)
+        resolved.append((pose_in_base, resolved_key_in_base))
+    return resolved
 
 
 def trim_to_length(tensor: torch.Tensor, length: Optional[int]) -> torch.Tensor:

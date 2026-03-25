@@ -10,7 +10,11 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from metalearning.tools.visualization_utils import load_pairs
-from metalearning.tools.visualize_trajectory import plot_episode_rewards, visualize_context_rollout_3d
+from metalearning.tools.visualize_trajectory import (
+    plot_episode_rewards,
+    visualize_context_rollout_3d,
+    visualize_context_rollout_3d_multi_keys,
+)
 
 
 def flatten_debug_obs(debug_obs: Any) -> dict[str, torch.Tensor]:
@@ -172,22 +176,37 @@ def save_rollout_visualizations(rollout_dir: str) -> None:
 
     rollout_episodes: list[Mapping[str, Any]] = []
     rollout_labels: list[str] = []
+    pose_keys_to_plot = ["end_effector_pose", "insertive_asset_pose", "receptive_asset_pose"]
     global_pair_idx = 0
     for pair_path in pair_paths:
         pairs = load_pairs(pair_path)
         for pair in pairs:
             context_episode = select_context_episode(pair)
             rollout_episode = pair["rollout"]
-            eef_out = out_dir / f"pair_{global_pair_idx:04d}_eef.png"
+            pose_out = out_dir / f"pair_{global_pair_idx:04d}_eef.png"
             try:
-                visualize_context_rollout_3d(
+                visualize_context_rollout_3d_multi_keys(
                     context_episode,
                     rollout_episode,
-                    out_path=eef_out,
+                    obs_keys=pose_keys_to_plot,
+                    out_path=pose_out,
                     backend="matplotlib",
                 )
             except Exception as exc:
-                print(f"[WARN] Failed to render pair {global_pair_idx} trajectory: {exc}")
+                print(
+                    f"[WARN] Failed to render pair {global_pair_idx} multi-key trajectory, "
+                    f"falling back to end-effector only: {exc}"
+                )
+                try:
+                    visualize_context_rollout_3d(
+                        context_episode,
+                        rollout_episode,
+                        obs_key="end_effector_pose",
+                        out_path=pose_out,
+                        backend="matplotlib",
+                    )
+                except Exception as fallback_exc:
+                    print(f"[WARN] Failed to render pair {global_pair_idx} eef trajectory: {fallback_exc}")
             rollout_episodes.append(rollout_episode)
             rollout_labels.append(f"rollout_{global_pair_idx:04d}")
             global_pair_idx += 1

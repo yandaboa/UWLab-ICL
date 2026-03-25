@@ -83,6 +83,40 @@ flowchart LR
   - checkpoints in `logs/rsl_rl/supervised_context/<timestamp>*/model_*.pt`
   - dumped config in `params/trainer.yaml`
 
+### 2D) Supervised MLP training / fine-tuning
+
+- Script: `scripts/reinforcement_learning/rsl_rl/train_supervised.py`
+- Purpose:
+  - Train a supervised MLP policy from a flat `(states, actions)` dataset.
+  - Optional fine-tuning mode from an existing checkpoint with a fresh optimizer.
+- Fine-tuning behavior:
+  - pass `--finetune_checkpoint <path_to_model.pt>`
+  - the script loads model weights from checkpoint
+  - optimizer state is intentionally discarded (new optimizer is created)
+  - learning rate starts at `original_checkpoint_lr / 5` (or `/ --finetune_lr_divisor`)
+  - outputs are saved under `<checkpoint_dir>/finetuned_<timestamp>/`
+
+### 2E) Split grouped episodes into per-task files
+
+- Script: `scripts/reinforcement_learning/rsl_rl/split_episode_groups.py`
+- Purpose:
+  - Take grouped rollouts (`episode_groups`) and write one `.pt` file per group to:
+    `<input_dir>/individual_tasks/`
+  - Each output file includes:
+    - original `episode_group`
+    - flattened `states` and `actions` tensors suitable for `train_supervised.py`
+    - reset metadata (`reset_states`, `reset_physics`) extracted from each episode for exact reset reproduction
+- Notes:
+  - `num_similar_trajectories` in payload indicates intended group size (commonly 64).
+  - saved groups can still be partial depending on save/flush timing.
+  - use `--postfilter_group_length <N>` to keep only groups of size `N` in output:
+    - groups shorter than `N` are skipped
+    - groups longer than `N` are randomly subsampled to `N` (`--postfilter_seed` controls reproducibility)
+  - visualization sanity check supports multiple pose keys via comma-separated `--plot_obs_key`, e.g.
+    `end_effector_pose,receptive_asset_pose,insertive_asset_pose`
+  - for visualization, `insertive_asset_pose` and `receptive_asset_pose` are resolved into robot-base frame
+    by composing with `end_effector_pose` when they are stored in end-effector frame
+
 ### 3) Demo tracking evaluation
 
 - Script: `scripts/reinforcement_learning/rsl_rl/eval_demo_tracking.py`

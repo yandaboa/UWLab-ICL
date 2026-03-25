@@ -36,6 +36,8 @@ parser.add_argument("--log_interval", type=int, default=100, help="How often to 
 parser.add_argument("--use_wandb", action="store_true", default=False, help="Enable wandb logging for eval stats.")
 parser.add_argument("--wandb_project", type=str, default="supervised_policy_eval", help="Weights & Biases project.")
 parser.add_argument("--wandb_run_name", type=str, default=None, help="Optional Weights & Biases run name.")
+parser.add_argument("--task_episodes", type=str, default=None, help="Optional task episodes to evaluate performance on. Environment starts at these configurations")
+
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -135,6 +137,23 @@ def _extract_scalar_log_metrics_from_extras(extras: Any) -> dict[str, float]:
     return payload
 
 
+def _to_wandb_config_value(value: Any) -> Any:
+    """Convert checkpoint payload values to wandb-config-friendly types."""
+    if isinstance(value, Mapping):
+        return {str(k): _to_wandb_config_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_wandb_config_value(v) for v in value]
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return float(value.detach().cpu().item())
+        return value.detach().cpu().tolist()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg) -> None:
     """Load supervised policy and roll out stochastic actions."""
@@ -148,7 +167,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
+    if args_cli.task_episodes is not None:
+        task_episodes = torch.load(args_cli.task_episodes)
+        reset_states = task_episodes["reset_states"]
+        reset_state_idx_raw = reset_states[0]["multi_reset_state_index"]
+        # Normalize to a 1-D list so reset event code can safely call len(...).
+        reset_state_idx = [int(v) for v in torch.as_tensor(reset_state_idx_raw).reshape(-1).tolist()]
+        env_cfg.events.reset_from_reset_states.params["state_indices_override"] = reset_state_idx
+
     resume_path = retrieve_file_path(args_cli.checkpoint)
+    model_name = os.path.basename(os.path.dirname(resume_path))
+    task_episodes_path = os.path.abspath(args_cli.task_episodes) if args_cli.task_episodes is not None else "None"
+    print(f"[INFO] Evaluating model={model_name}")
+    print(f"[INFO] Evaluation checkpoint path={os.path.abspath(resume_path)}")
+    print(f"[INFO] Evaluation task_episodes path={task_episodes_path}")
     log_dir = os.path.dirname(resume_path)
     env_cfg.log_dir = log_dir
 
@@ -177,6 +209,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"action_dim={checkpoint['action_dim']} loss_type={checkpoint.get('loss_type', 'gaussian_nll')}"
     )
     wandb_run = _init_wandb()
+    if wandb_run is not None:
+        checkpoint_config = checkpoint.get("config", {})
+        if isinstance(checkpoint_config, Mapping):
+            wandb_model_config = _to_wandb_config_value(dict(checkpoint_config))
+        else:
+            wandb_model_config = {
+                "state_dim": int(checkpoint["state_dim"]),
+                "action_dim": int(checkpoint["action_dim"]),
+                "hidden_dims": list(checkpoint.get("hidden_dims", [])),
+                "loss_type": str(checkpoint.get("loss_type", "gaussian_nll")),
+                "log_std_min": float(checkpoint.get("log_std_min", -5.0)),
+                "log_std_max": float(checkpoint.get("log_std_max", 2.0)),
+            }
+        wandb_run.config.update(
+            {
+                "eval_model_name": model_name,
+                "eval_checkpoint_path": os.path.abspath(resume_path),
+                "eval_task_episodes_path": task_episodes_path,
+                "eval_model_config": wandb_model_config,
+            },
+            allow_val_change=True,
+        )
 
     dt = float(env.unwrapped.step_dt)
     obs = _unwrap_initial_obs(env.get_observations())
@@ -259,15 +313,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             sleep_time = dt - (time.time() - start_time)
             if args_cli.real_time and sleep_time > 0:
                 time.sleep(sleep_time)
+        success_rate = (float(total_successes) / float(total_episodes)) if total_episodes > 0 else 0.0
+        print(f"[INFO] Completed supervised evaluation for {steps_executed} steps.")
+        print(f"[INFO] Total successes: {total_successes}")
+        print(f"[INFO] Total episodes: {total_episodes}")
+        print(f"[INFO] Success rate: {success_rate * 100:.2f}%")
+
+        if wandb_run is not None:
+            wandb_run.summary.update(
+                {
+                    "success_rate": success_rate,
+                    "total_episodes": total_episodes,
+                    "total_successes": total_successes,
+                }
+            )
+            wandb_run.summary["eval_model_name"] = model_name
+            wandb_run.summary["eval_checkpoint_path"] = os.path.abspath(resume_path)
+            wandb_run.summary["eval_task_episodes_path"] = task_episodes_path
     finally:
         progress_bar.close()
         if wandb_run is not None:
             wandb_run.finish()
 
-    print(f"[INFO] Completed supervised evaluation for {steps_executed} steps.")
-    print(f"[INFO] Total successes: {total_successes}")
-    print(f"[INFO] Total episodes: {total_episodes}")
-    print(f"[INFO] Success rate: {total_successes / total_episodes * 100:.2f}%")
+
     env.close()
 
 

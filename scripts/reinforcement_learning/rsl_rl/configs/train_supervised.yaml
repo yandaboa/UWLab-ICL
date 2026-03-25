@@ -2,7 +2,7 @@ dataset:
   path: /home/ubuntu/lti/UWLab-ICL/50k_supervised_dataset_s_phys_rnge.pt
 
 model:
-  hidden_dims: [1024, 1024, 1024, 512, 256]
+  hidden_dims: [1024, 1024, 1024, 1024, 1024]
   loss_type: gaussian_nll
   normalize_action_targets: true
   action_norm_min_std: 1.0e-6
@@ -15,7 +15,7 @@ training:
   weight_decay: 1e-4
   batch_size: 2048
   epochs: 300
-  val_split: 0.1
+  val_split: 0.25
   num_workers: 4
   seed: 42
   save_every_epochs: 5

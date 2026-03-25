@@ -239,27 +239,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         if args_cli.use_pretrained_checkpoint:
             resume_path = get_published_pretrained_checkpoint("rsl_rl", train_task_name)
+            log_dir = os.path.dirname(resume_path)
             if not resume_path:
                 print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
                 return
         elif args_cli.checkpoint:
             resume_path = retrieve_file_path(args_cli.checkpoint)
-        else:
-            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
-        if use_supervised:
-            supervised_ckpt_path = retrieve_file_path(args_cli.supervised_context_checkpoint)
-            resume_run_tag = os.path.basename(os.path.dirname(resume_path))
-            resume_ckpt_tag = os.path.splitext(os.path.basename(resume_path))[0]
-            supervised_ckpt_tag = os.path.splitext(os.path.basename(supervised_ckpt_path))[0]
-            log_dir = os.path.join(
-                os.path.dirname(supervised_ckpt_path),
-                "eval_demo_tracking",
-                f"rl_{resume_run_tag}",
-                f"checkpoint_{resume_ckpt_tag}",
-                f"supervised_{supervised_ckpt_tag}",
-            )
-        else:
             log_dir = os.path.dirname(resume_path)
+        else:
+            assert args_cli.supervised_context_checkpoint is not None
+            supervised_ckpt_path = retrieve_file_path(args_cli.supervised_context_checkpoint)
+            supervised_log_dir = os.path.dirname(supervised_ckpt_path)
+            log_dir = os.path.join(supervised_log_dir, "eval_demo_tracking")
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir

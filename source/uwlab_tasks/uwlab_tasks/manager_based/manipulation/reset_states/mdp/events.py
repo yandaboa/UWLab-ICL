@@ -1000,6 +1000,7 @@ class MultiResetManager(ManagerTermBase):
         base_paths: list[str] = cfg.params.get("base_paths", [])
         probabilities: list[float] = cfg.params.get("probs", [])
         self.reset_to_same_state: bool = cfg.params.get("reset_to_same_state", False)
+        self.state_indices_override: list[int] = cfg.params.get("state_indices_override", [])
 
         if not base_paths:
             raise ValueError("No base paths provided")
@@ -1073,6 +1074,7 @@ class MultiResetManager(ManagerTermBase):
         success: str | None = None,
         iterate_through_resets: bool = False,
         reset_to_same_state: bool = False,
+        state_indices_override: list[int] = [], # override the state indices for each env to only use these values
     ) -> None:
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self._env.device)
@@ -1123,6 +1125,10 @@ class MultiResetManager(ManagerTermBase):
 
         def _sample_state_indices(dataset_idx: int, count: int) -> torch.Tensor:
             num_states_for_dataset = int(self.num_states[dataset_idx].item())
+            if len(state_indices_override) > 0:
+                assert len(self.datasets) == 1, "state_indices_override is only supported for a single dataset"
+                allowed_state_indices = torch.tensor(state_indices_override, device=self._env.device)
+                return allowed_state_indices[torch.randint(0, len(allowed_state_indices), (count,), device=self._env.device)]
             if iterate_mode and not self._iter_exhausted[dataset_idx]:
                 next_idx = int(self._next_state_index[dataset_idx].item())
                 end_idx = next_idx + count

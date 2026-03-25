@@ -190,28 +190,45 @@ def save_checkpoint(
     cfg: TrainConfig,
     best_val_loss: float,
     config_path: str,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> None:
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "state_dim": state_dim,
-            "action_dim": action_dim,
-            "hidden_dims": cfg.hidden_dims,
-            "loss_type": cfg.loss_type,
-            "log_std_min": cfg.log_std_min,
-            "log_std_max": cfg.log_std_max,
-            "best_val_loss": best_val_loss,
-            "action_norm_mean": model.action_norm_mean.detach().cpu(),
-            "action_norm_std": model.action_norm_std.detach().cpu(),
-            "normalize_action_targets": cfg.normalize_action_targets,
-            "config": asdict(cfg),
-            "config_path": os.path.abspath(config_path),
-            "dataset_path": os.path.abspath(cfg.dataset_path),
-        },
-        path,
-    )
+    payload: dict[str, Any] = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "state_dim": state_dim,
+        "action_dim": action_dim,
+        # Architecture/loss metadata must reflect the instantiated model (checkpoint source of truth),
+        # not the potentially different YAML model config used for fine-tuning.
+        "hidden_dims": list(model.hidden_dims),
+        "loss_type": str(model.loss_type),
+        "log_std_min": float(model.log_std_min),
+        "log_std_max": float(model.log_std_max),
+        "best_val_loss": best_val_loss,
+        "action_norm_mean": model.action_norm_mean.detach().cpu(),
+        "action_norm_std": model.action_norm_std.detach().cpu(),
+        "normalize_action_targets": cfg.normalize_action_targets,
+        "config": asdict(cfg),
+        "config_path": os.path.abspath(config_path),
+        "dataset_path": os.path.abspath(cfg.dataset_path),
+    }
+    if extra_metadata:
+        payload["finetune"] = extra_metadata
+    torch.save(payload, path)
+
+
+def _infer_original_learning_rate(checkpoint: dict[str, Any], fallback_learning_rate: float) -> float:
+    checkpoint_cfg = checkpoint.get("config")
+    if isinstance(checkpoint_cfg, dict) and "learning_rate" in checkpoint_cfg:
+        return float(checkpoint_cfg["learning_rate"])
+
+    optimizer_state = checkpoint.get("optimizer_state_dict")
+    if isinstance(optimizer_state, dict):
+        param_groups = optimizer_state.get("param_groups")
+        if isinstance(param_groups, list) and len(param_groups) > 0 and "lr" in param_groups[0]:
+            return float(param_groups[0]["lr"])
+
+    return float(fallback_learning_rate)
 
 
 def init_wandb(
@@ -302,12 +319,53 @@ def main():
         default=os.path.join(os.path.dirname(__file__), "configs", "train_supervised.yaml"),
         help="Path to YAML configuration file.",
     )
+    parser.add_argument(
+        "--finetune_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Optional checkpoint path. If provided, loads model weights from this checkpoint and fine-tunes "
+            "using --config dataset with a fresh optimizer."
+        ),
+    )
+    parser.add_argument(
+        "--finetune_dataset",
+        type=str,
+        default=None,
+        help="Optional dataset path to use for fine-tuning. If provided, overrides the dataset path in the config.",
+    )
+    parser.add_argument(
+        "--finetune_lr_divisor",
+        type=float,
+        default=5.0,
+        help="Divides the source checkpoint learning rate by this value during fine-tuning.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Optional override for training epochs (useful for short fine-tuning runs).",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
 
+    if args.finetune_dataset is not None:
+        args.finetune_dataset = os.path.abspath(args.finetune_dataset)
+        if not os.path.isfile(args.finetune_dataset):
+            raise FileNotFoundError(f"Dataset file not found: {args.finetune_dataset}")
+        
+        cfg.dataset_path = args.finetune_dataset
+
+    if args.epochs is not None:
+        if args.epochs <= 0:
+            raise ValueError(f"--epochs must be > 0, got {args.epochs}")
+        cfg.epochs = int(args.epochs)
+
     if cfg.save_every_epochs <= 0:
         raise ValueError(f"save_every_epochs must be > 0, got {cfg.save_every_epochs}")
+    if args.finetune_lr_divisor <= 0.0:
+        raise ValueError(f"finetune_lr_divisor must be > 0, got {args.finetune_lr_divisor}")
 
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -339,30 +397,101 @@ def main():
         seed=cfg.seed,
     )
 
+    print("Length of training dataset:", len(train_loader.dataset))
+    print("Length of validation dataset:", len(val_loader.dataset))
+
     state_dim = int(states.shape[1])
     action_dim = int(actions.shape[1])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model : SupervisedMLPPolicy = SupervisedMLPPolicy(
-        state_dim=state_dim,
-        action_dim=action_dim,
-        hidden_dims=cfg.hidden_dims,
-        loss_type=cfg.loss_type,
-        log_std_min=cfg.log_std_min,
-        log_std_max=cfg.log_std_max,
-    ).to(device)
-    if cfg.normalize_action_targets:
-        action_norm_mean = actions.mean(dim=0)
-        action_norm_std = actions.std(dim=0, unbiased=False).clamp_min(cfg.action_norm_min_std)
+    finetune_metadata: dict[str, Any] | None = None
+    if args.finetune_checkpoint is None:
+        model: SupervisedMLPPolicy = SupervisedMLPPolicy(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dims=cfg.hidden_dims,
+            loss_type=cfg.loss_type,
+            log_std_min=cfg.log_std_min,
+            log_std_max=cfg.log_std_max,
+        ).to(device)
+        if cfg.normalize_action_targets:
+            action_norm_mean = actions.mean(dim=0)
+            action_norm_std = actions.std(dim=0, unbiased=False).clamp_min(cfg.action_norm_min_std)
+        else:
+            action_norm_mean = torch.zeros(action_dim, dtype=torch.float32)
+            action_norm_std = torch.ones(action_dim, dtype=torch.float32)
+        model.set_action_normalization(action_norm_mean, action_norm_std)
+
+        effective_learning_rate = cfg.learning_rate
     else:
-        action_norm_mean = torch.zeros(action_dim, dtype=torch.float32)
-        action_norm_std = torch.ones(action_dim, dtype=torch.float32)
-    model.set_action_normalization(action_norm_mean, action_norm_std)
+        finetune_checkpoint_path = os.path.abspath(args.finetune_checkpoint)
+        checkpoint_payload = torch.load(finetune_checkpoint_path, map_location="cpu")
+        if "model_state_dict" not in checkpoint_payload:
+            raise KeyError(f"Checkpoint {finetune_checkpoint_path} missing 'model_state_dict'.")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+        checkpoint_state_dim = int(checkpoint_payload.get("state_dim", state_dim))
+        checkpoint_action_dim = int(checkpoint_payload.get("action_dim", action_dim))
+        if checkpoint_state_dim != state_dim or checkpoint_action_dim != action_dim:
+            raise ValueError(
+                "Checkpoint dims must match dataset dims for fine-tuning: "
+                f"checkpoint=({checkpoint_state_dim}, {checkpoint_action_dim}) "
+                f"dataset=({state_dim}, {action_dim})"
+            )
 
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = os.path.join(cfg.output_dir, f"supervised_{timestamp}")
+        checkpoint_hidden_dims = list(checkpoint_payload.get("hidden_dims", cfg.hidden_dims))
+        checkpoint_loss_type = str(checkpoint_payload.get("loss_type", cfg.loss_type))
+        checkpoint_log_std_min = float(checkpoint_payload.get("log_std_min", cfg.log_std_min))
+        checkpoint_log_std_max = float(checkpoint_payload.get("log_std_max", cfg.log_std_max))
+
+        model = SupervisedMLPPolicy(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            hidden_dims=checkpoint_hidden_dims,
+            loss_type=checkpoint_loss_type,
+            log_std_min=checkpoint_log_std_min,
+            log_std_max=checkpoint_log_std_max,
+        ).to(device)
+        model.load_state_dict(checkpoint_payload["model_state_dict"])
+
+        if "action_norm_mean" in checkpoint_payload and "action_norm_std" in checkpoint_payload:
+            action_norm_mean = checkpoint_payload["action_norm_mean"].float()
+            action_norm_std = checkpoint_payload["action_norm_std"].float().clamp_min(cfg.action_norm_min_std)
+        elif cfg.normalize_action_targets:
+            action_norm_mean = actions.mean(dim=0)
+            action_norm_std = actions.std(dim=0, unbiased=False).clamp_min(cfg.action_norm_min_std)
+        else:
+            action_norm_mean = torch.zeros(action_dim, dtype=torch.float32)
+            action_norm_std = torch.ones(action_dim, dtype=torch.float32)
+        model.set_action_normalization(action_norm_mean, action_norm_std)
+
+        original_learning_rate = _infer_original_learning_rate(
+            checkpoint=checkpoint_payload,
+            fallback_learning_rate=cfg.learning_rate,
+        )
+        effective_learning_rate = original_learning_rate / args.finetune_lr_divisor
+        finetune_metadata = {
+            "source_checkpoint": finetune_checkpoint_path,
+            "original_learning_rate": float(original_learning_rate),
+            "finetune_learning_rate": float(effective_learning_rate),
+            "finetune_lr_divisor": float(args.finetune_lr_divisor),
+            "source_epoch": int(checkpoint_payload.get("epoch", -1)),
+            "dataset_path": os.path.abspath(cfg.dataset_path),
+        }
+        print(
+            "[INFO] Fine-tuning from checkpoint: "
+            f"{finetune_checkpoint_path} with lr={effective_learning_rate:.8f} "
+            f"(original_lr={original_learning_rate:.8f}, divisor={args.finetune_lr_divisor})"
+        )
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=effective_learning_rate, weight_decay=cfg.weight_decay)
+
+    # Use microseconds to avoid run-dir collisions when launching multiple jobs in parallel.
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+    if args.finetune_checkpoint is None:
+        run_dir = os.path.join(cfg.output_dir, f"supervised_{timestamp}")
+    else:
+        checkpoint_dir = os.path.dirname(os.path.abspath(args.finetune_checkpoint))
+        run_dir = os.path.join(checkpoint_dir, f"finetuned_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
 
     wandb_run, wandb_module = init_wandb(
@@ -418,10 +547,6 @@ def main():
                 "val/loss": val_loss,
                 "train/lr": float(optimizer.param_groups[0]["lr"]),
             }
-            if model.log_std_param is not None:
-                log_payload["train/log_std_mean"] = float(model.log_std_param.detach().mean().item())
-                log_payload["train/log_std_min"] = float(model.log_std_param.detach().min().item())
-                log_payload["train/log_std_max"] = float(model.log_std_param.detach().max().item())
             wandb_module.log(log_payload)
 
         if val_loss < best_val_loss:
@@ -437,6 +562,7 @@ def main():
                 cfg=cfg,
                 best_val_loss=best_val_loss,
                 config_path=args.config,
+                extra_metadata=finetune_metadata,
             )
             log_checkpoint_to_wandb(
                 wandb_run=wandb_run,
@@ -459,6 +585,7 @@ def main():
                 cfg=cfg,
                 best_val_loss=best_val_loss,
                 config_path=args.config,
+                extra_metadata=finetune_metadata,
             )
             log_checkpoint_to_wandb(
                 wandb_run=wandb_run,
@@ -481,6 +608,7 @@ def main():
             cfg=cfg,
             best_val_loss=best_val_loss,
             config_path=args.config,
+            extra_metadata=finetune_metadata,
         )
         log_checkpoint_to_wandb(
             wandb_run=wandb_run,

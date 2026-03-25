@@ -658,9 +658,9 @@ class DebugObservationsCfg(ObservationsCfg):
 class DemoCfg(ObsGroup):
     """Observations for demo group."""
 
-    joint_pos = ObsTerm(func=omni_reset_mdp.joint_pos)
+    prev_actions = ObsTerm(func=omni_reset_mdp.last_action)
 
-    demo_link_quats = ObsTerm(func=from_demo_mdp.demo_link_quats)
+    joint_pos = ObsTerm(func=omni_reset_mdp.joint_pos)
 
     end_effector_pose = ObsTerm(
         func=omni_reset_mdp.target_asset_pose_in_root_asset_frame_with_metadata,
@@ -704,7 +704,7 @@ class DemoCfg(ObsGroup):
     def __post_init__(self):
         self.enable_corruption = False
         self.concatenate_terms = False
-        self.history_length = 1
+        self.history_length = 5
 
 @configclass
 class SupervisedEvalObsCfg(ObsGroup):
@@ -1404,17 +1404,19 @@ class Ur5eRobotiq2f85RelJointPosFromDemoTrainCfg(Ur5eRobotiq2f85RlStateCfg):
         super().__post_init__()
         self.scene.robot = EXPLICIT_UR5E_ROBOTIQ_2F85.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-        # self.events.randomize_robot_actuator_parameters = EventTerm(
-        #     func=omni_reset_mdp.randomize_operational_space_controller_gains,
-        #     mode="reset",
-        #     params={
-        #         "action_name": "arm",
-        #         "stiffness_distribution_params": (0.7, 1.3),
-        #         "damping_distribution_params": (0.9, 1.1),
-        #         "operation": "scale",
-        #         "distribution": "uniform",
-        #     },
-        # )
+        self.events.randomize_robot_actuator_parameters = EventTerm(
+            func=omni_reset_mdp.randomize_operational_space_controller_gains,
+            mode="reset",
+            params={
+                "action_name": "arm",
+                # "stiffness_distribution_params": (0.7, 1.3),
+                "stiffness_distribution_params": (1.0, 1.0),
+                # "damping_distribution_params": (0.9, 1.1),
+                "damping_distribution_params": (1.0, 1.0),
+                "operation": "scale",
+                "distribution": "uniform",
+            },
+        )
 
 @configclass
 class Ur5eRobotiq2f85RelJointPosFromDemoSupervisedEvalCfg(Ur5eRobotiq2f85RelJointPosFromDemoTrainCfg):
