@@ -1,15 +1,8 @@
 data:
   train_episode_paths:
-    - episodes/20260303_034130/episodes_000001_trim_episodes_from_groups_6.pt
-    - episodes/20260303_034130/episodes_000002_trim_episodes_from_groups_6.pt
-    - episodes/20260303_034130/episodes_000003_trim_episodes_from_groups_6.pt
-    - episodes/20260303_034130/episodes_000004_trim_episodes_from_groups_6.pt
-    - episodes/20260303_034130/episodes_000005_trim_episodes_from_groups_6.pt
-    - episodes/20260303_034130/episodes_000006_trim_episodes_from_groups_6.pt
-    - episodes/20260303_034130/episodes_000007_trim_episodes_from_groups_6.pt
-    - episodes/20260303_034130/episodes_000008_trim_episodes_from_groups_6.pt
+    - episodes/20260303_034130/episodes_000001_trim.pt
   validation_episode_paths:
-    - episodes/20260303_034130/episodes_000000_trim_episodes_from_groups_6.pt
+    - episodes/20260303_034130/episodes_000000_trim.pt
   episode_paths: []
   obs_keys:
     - joint_pos
@@ -18,9 +11,9 @@ data:
     - receptive_asset_pose
     - insertive_asset_in_receptive_asset_frame
   max_context_length: null
-  num_context_episodes: 2
+  num_context_episodes: 3
   minimum_num_context_trajs: 2
-  batch_size: 64
+  batch_size: 32
   num_workers: 4
   shuffle: true
   train_on_data_augs: false
@@ -39,14 +32,14 @@ model:
   encoding_projection_hidden_dim: null
   embedding_dim: 256
   hidden_dim: 512
-  num_layers: 6
+  num_layers: 12
   num_heads: 4
   embedding_dropout: 0.2
   attention_dropout: 0.2
   residual_dropout: 0.2
 
 optim:
-  num_steps: 150000
+  num_steps: 75000
   learning_rate: 1.0e-4
   weight_decay: 0.0
   betas: [0.9, 0.99]
@@ -59,14 +52,14 @@ optim:
   grad_accumulation_steps: 4
 
 input:
-  include_current_trajectory: false
+  include_current_trajectory: true
 
 distributed:
   distributed: false
 
 logging:
-  experiment_name: supervised_context_pm
-  run_name: "copying_fixed"
+  experiment_name: supervised_context
+  run_name: "tracking_demo"
   log_interval: 1
   save_interval: 5000
   log_project_name: null

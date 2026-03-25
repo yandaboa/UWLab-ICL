@@ -48,7 +48,7 @@ def expand_episode_paths(episode_paths: Iterable[str]) -> list[str]:
     return deduped
 
 
-class InverseDynamicsTransitionDataset(Dataset[dict[str, torch.Tensor]]):
+class ForwardDynamicsTransitionDataset(Dataset[dict[str, torch.Tensor]]):
     """Samples (state_t, action_t, state_tp1) transitions from collected episodes."""
 
     def __init__(self, episode_paths: Iterable[str], obs_keys: list[str] | None) -> None:
@@ -58,7 +58,7 @@ class InverseDynamicsTransitionDataset(Dataset[dict[str, torch.Tensor]]):
 
         resolved_paths = expand_episode_paths(episode_paths)
         if not resolved_paths:
-            raise ValueError("No episode paths provided for inverse dynamics dataset.")
+            raise ValueError("No episode paths provided for forward dynamics dataset.")
         for path in resolved_paths:
             data = torch.load(path, map_location="cpu")
             episodes = data.get("episodes", [])
@@ -94,7 +94,7 @@ class InverseDynamicsTransitionDataset(Dataset[dict[str, torch.Tensor]]):
         }
 
 
-def collate_inverse_dynamics(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+def collate_forward_dynamics(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     return {
         "state_t": torch.stack([item["state_t"] for item in batch], dim=0),
         "action_t": torch.stack([item["action_t"] for item in batch], dim=0),

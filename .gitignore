@@ -50,6 +50,7 @@ partial_assembly_datasets/
 partial_assembly_datasets_small/
 reset_state_datasets/
 episodes/visualizations
+renders/
 episodes/*
 exported
 rollouts/

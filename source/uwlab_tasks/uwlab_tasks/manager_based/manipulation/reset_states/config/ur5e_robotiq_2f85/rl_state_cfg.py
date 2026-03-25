@@ -117,10 +117,10 @@ class BaseEventCfg:
         func=omni_reset_mdp.randomize_rigid_body_material,  # type: ignore
         mode="startup",
         params={
-            # "static_friction_range": (0.3, 1.2),
-            "static_friction_range": (0.75, 0.75),
-            "dynamic_friction_range": (0.6, 0.6),
-            # "dynamic_friction_range": (0.2, 1.0),
+            "static_friction_range": (0.3, 1.2),
+            # "static_friction_range": (0.75, 0.75),
+            # "dynamic_friction_range": (0.6, 0.6),
+            "dynamic_friction_range": (0.2, 1.0),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("robot"),
@@ -133,10 +133,10 @@ class BaseEventCfg:
         func=omni_reset_mdp.randomize_rigid_body_material,  # type: ignore
         mode="startup",
         params={
-            # "static_friction_range": (1.0, 2.0),
-            "static_friction_range": (1.5, 1.5),
-            # "dynamic_friction_range": (0.9, 1.9),
-            "dynamic_friction_range": (1.4, 1.4),
+            "static_friction_range": (1.0, 2.0),
+            # "static_friction_range": (1.5, 1.5),
+            "dynamic_friction_range": (0.9, 1.9),
+            # "dynamic_friction_range": (1.4, 1.4),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("insertive_object"),
@@ -149,10 +149,10 @@ class BaseEventCfg:
         func=omni_reset_mdp.randomize_rigid_body_material,  # type: ignore
         mode="startup",
         params={
-            # "static_friction_range": (1.0, 2.0),
-            "static_friction_range": (1.5, 1.5),
-            # "dynamic_friction_range": (0.9, 1.9),
-            "dynamic_friction_range": (1.4, 1.4),
+            "static_friction_range": (1.0, 2.0),
+            # "static_friction_range": (1.5, 1.5),
+            "dynamic_friction_range": (0.9, 1.9),
+            # "dynamic_friction_range": (1.4, 1.4),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("receptive_object"),
@@ -164,10 +164,10 @@ class BaseEventCfg:
         func=omni_reset_mdp.randomize_rigid_body_material,  # type: ignore
         mode="startup",
         params={
-            # "static_friction_range": (0.3, 0.6),
-            "static_friction_range": (0.45, 0.45),
-            # "dynamic_friction_range": (0.2, 0.5),
-            "dynamic_friction_range": (0.35, 0.35),
+            "static_friction_range": (0.3, 0.6),
+            # "static_friction_range": (0.45, 0.45),
+            "dynamic_friction_range": (0.2, 0.5),
+            # "dynamic_friction_range": (0.35, 0.35),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("table"),
@@ -180,8 +180,8 @@ class BaseEventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "mass_distribution_params": (1.0, 1.0),
-            # "mass_distribution_params": (0.7, 1.3),
+            # "mass_distribution_params": (1.0, 1.0),
+            "mass_distribution_params": (0.2, 4.0),
             "operation": "scale",
             "distribution": "uniform",
             "recompute_inertia": True,
@@ -194,8 +194,8 @@ class BaseEventCfg:
         params={
             "asset_cfg": SceneEntityCfg("insertive_object"),
             # we assume insertive object is somewhere between 20g and 200g
-            # "mass_distribution_params": (0.02, 0.2),
-            "mass_distribution_params": (0.11, 0.11),
+            "mass_distribution_params": (0.02, 0.2),
+            # "mass_distribution_params": (0.11, 0.11),
             "operation": "abs",
             "distribution": "uniform",
             "recompute_inertia": True,
@@ -207,8 +207,8 @@ class BaseEventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("receptive_object"),
-            "mass_distribution_params": (0.75, 0.75),
-            # "mass_distribution_params": (0.5, 1.5),
+            # "mass_distribution_params": (0.75, 0.75),
+            "mass_distribution_params": (0.5, 1.5),
             "operation": "scale",
             "distribution": "uniform",
             "recompute_inertia": True,
@@ -220,8 +220,8 @@ class BaseEventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("table"),
-            "mass_distribution_params": (0.75, 0.75),
-            # "mass_distribution_params": (0.5, 1.5),
+            # "mass_distribution_params": (0.75, 0.75),
+            "mass_distribution_params": (0.5, 1.5),
             "operation": "scale",
             "distribution": "uniform",
             "recompute_inertia": True,
@@ -233,10 +233,10 @@ class BaseEventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=["shoulder.*", "elbow.*", "wrist.*", "finger_joint"]),
-            # "friction_distribution_params": (0.25, 4.0),
-            "friction_distribution_params": (0.325, 0.325),
-            # "armature_distribution_params": (0.25, 4.0),
-            "armature_distribution_params": (0.325, 0.325),
+            "friction_distribution_params": (0.25, 4.0),
+            # "friction_distribution_params": (0.325, 0.325),
+            "armature_distribution_params": (0.25, 4.0),
+            # "armature_distribution_params": (0.325, 0.325),
             "operation": "scale",
             "distribution": "log_uniform",
         },
@@ -247,10 +247,10 @@ class BaseEventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=["finger_joint"]),
-            # "stiffness_distribution_params": (0.5, 2.0),
-            "stiffness_distribution_params": (1.25, 1.25),
-            # "damping_distribution_params": (0.5, 2.0),
-            "damping_distribution_params": (1.25, 1.25),
+            "stiffness_distribution_params": (0.5, 2.0),
+            # "stiffness_distribution_params": (1.25, 1.25),
+            "damping_distribution_params": (0.5, 2.0),
+            # "damping_distribution_params": (1.25, 1.25),
             "operation": "scale",
             "distribution": "log_uniform",
         },
@@ -481,6 +481,101 @@ class ObservationsCfg:
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
 
+@configclass
+class PrivPolicyCfg(ObsGroup):
+
+    robot_material_properties = ObsTerm(
+        func=omni_reset_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+
+    insertive_object_material_properties = ObsTerm(
+        func=omni_reset_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    )
+
+    receptive_object_material_properties = ObsTerm(
+        func=omni_reset_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    )
+
+    table_material_properties = ObsTerm(
+        func=omni_reset_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("table")}
+    )
+
+    robot_mass = ObsTerm(func=omni_reset_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    insertive_object_mass = ObsTerm(
+        func=omni_reset_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    )
+
+    receptive_object_mass = ObsTerm(
+        func=omni_reset_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    )
+
+    table_mass = ObsTerm(func=omni_reset_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
+
+    robot_joint_friction = ObsTerm(func=omni_reset_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    robot_joint_armature = ObsTerm(func=omni_reset_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    robot_joint_stiffness = ObsTerm(
+        func=omni_reset_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+
+    robot_joint_damping = ObsTerm(func=omni_reset_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    prev_actions = ObsTerm(func=omni_reset_mdp.last_action)
+
+    joint_pos = ObsTerm(func=omni_reset_mdp.joint_pos)
+
+    end_effector_pose = ObsTerm(
+        func=omni_reset_mdp.target_asset_pose_in_root_asset_frame_with_metadata,
+        params={
+            "target_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
+            "root_asset_cfg": SceneEntityCfg("robot"),
+            "target_asset_offset_metadata_key": "gripper_offset",
+            "root_asset_offset_metadata_key": "offset",
+            "rotation_repr": "axis_angle",
+        },
+    )
+
+    insertive_asset_pose = ObsTerm(
+        func=omni_reset_mdp.target_asset_pose_in_root_asset_frame_with_metadata,
+        params={
+            "target_asset_cfg": SceneEntityCfg("insertive_object"),
+            "root_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
+            "root_asset_offset_metadata_key": "gripper_offset",
+            "rotation_repr": "axis_angle",
+        },
+    )
+
+    receptive_asset_pose = ObsTerm(
+        func=omni_reset_mdp.target_asset_pose_in_root_asset_frame,
+        params={
+            "target_asset_cfg": SceneEntityCfg("receptive_object"),
+            "root_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
+            "rotation_repr": "axis_angle",
+            # "ood_offset": 0.5,
+        },
+    )
+
+    insertive_asset_in_receptive_asset_frame: ObsTerm = ObsTerm(
+        func=omni_reset_mdp.target_asset_pose_in_root_asset_frame,
+        params={
+            "target_asset_cfg": SceneEntityCfg("insertive_object"),
+            "root_asset_cfg": SceneEntityCfg("receptive_object"),
+            "rotation_repr": "axis_angle",
+            # "ood_offset": 0.5,
+        },
+    )
+
+    def __post_init__(self):
+        self.enable_corruption = False
+        self.concatenate_terms = True
+        self.history_length = 5
+
+@configclass
+class PrivObservationsCfg(ObservationsCfg):
+
+    policy: PrivPolicyCfg = PrivPolicyCfg()
 
 @configclass
 class RewardsCfg:
@@ -645,6 +740,7 @@ class Ur5eRobotiq2f85RelCartesianOSCTrainCfg(Ur5eRobotiq2f85RlStateCfg):
 
     events: TrainEventCfg = TrainEventCfg()
     actions: Ur5eRobotiq2f85RelativeOSCAction = Ur5eRobotiq2f85RelativeOSCAction()
+    observations: PrivObservationsCfg = PrivObservationsCfg()
 
     def __post_init__(self):
         super().__post_init__()
@@ -655,8 +751,9 @@ class Ur5eRobotiq2f85RelCartesianOSCTrainCfg(Ur5eRobotiq2f85RlStateCfg):
             mode="reset",
             params={
                 "action_name": "arm",
-                "stiffness_distribution_params": (0.7, 1.3),
-                "damping_distribution_params": (0.9, 1.1),
+                # "stiffness_distribution_params": (0.7, 1.3),
+                "stiffness_distribution_params": (0.2, 4.0),
+                "damping_distribution_params": (0.2, 4.0),
                 "operation": "scale",
                 "distribution": "uniform",
             },

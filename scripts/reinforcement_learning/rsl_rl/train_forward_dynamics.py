@@ -35,8 +35,8 @@ from isaaclab.utils.io import dump_yaml
 from uwlab_rl.rsl_rl.forward_dynamics_cfg import ForwardDynamicsTrainerCfg
 from uwlab_rl.rsl_rl.forward_dynamics_utils import (
     ForwardDynamicsResidualMLP,
-    InverseDynamicsTransitionDataset,
-    collate_inverse_dynamics,
+    ForwardDynamicsTransitionDataset,
+    collate_forward_dynamics,
 )
 
 
@@ -95,21 +95,21 @@ def main() -> None:
 
     train_episode_paths = cfg.data.train_episode_paths
     assert train_episode_paths is not None, "Training episode paths must be provided via config or CLI."
-    train_dataset = InverseDynamicsTransitionDataset(train_episode_paths, cfg.data.obs_keys)
+    train_dataset = ForwardDynamicsTransitionDataset(train_episode_paths, cfg.data.obs_keys)
     if len(train_dataset) == 0:
-        raise RuntimeError("No transitions found for inverse dynamics training.")
+        raise RuntimeError("No transitions found for forward dynamics training.")
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.data.batch_size,
         shuffle=cfg.data.shuffle,
         num_workers=cfg.data.num_workers,
         drop_last=len(train_dataset) >= int(cfg.data.batch_size),
-        collate_fn=collate_inverse_dynamics,
+        collate_fn=collate_forward_dynamics,
     )
 
     val_loader = None
     if cfg.data.validation_episode_paths:
-        val_dataset = InverseDynamicsTransitionDataset(cfg.data.validation_episode_paths, cfg.data.obs_keys)
+        val_dataset = ForwardDynamicsTransitionDataset(cfg.data.validation_episode_paths, cfg.data.obs_keys)
         if len(val_dataset) > 0:
             val_loader = DataLoader(
                 val_dataset,
@@ -117,7 +117,7 @@ def main() -> None:
                 shuffle=False,
                 num_workers=cfg.data.num_workers,
                 drop_last=False,
-                collate_fn=collate_inverse_dynamics,
+                collate_fn=collate_forward_dynamics,
             )
 
     sample = train_dataset[0]
