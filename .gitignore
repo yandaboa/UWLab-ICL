@@ -71,3 +71,8 @@ tests/
 
 # Docker history
 .uw-lab-docker-history
+
+# Yanda Misc.
+episodes/
+exported/
+reset_state_datasets*/
