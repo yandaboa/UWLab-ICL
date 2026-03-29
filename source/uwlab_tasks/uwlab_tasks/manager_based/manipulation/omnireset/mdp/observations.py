@@ -170,6 +170,19 @@ def get_joint_friction(
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
     return asset.data.joint_friction_coeff.view(env.num_envs, -1)
 
+def get_joint_dynamic_friction(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+):
+    asset: RigidObject | Articulation = env.scene[asset_cfg.name]
+    return asset.data.joint_dynamic_friction_coeff.view(env.num_envs, -1)
+
+def get_joint_viscous_friction(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+):
+    asset: RigidObject | Articulation = env.scene[asset_cfg.name]
+    return asset.data.joint_viscous_friction_coeff.view(env.num_envs, -1)
 
 def get_joint_armature(
     env: ManagerBasedRLEnv,

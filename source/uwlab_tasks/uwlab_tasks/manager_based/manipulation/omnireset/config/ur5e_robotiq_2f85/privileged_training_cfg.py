@@ -1,12 +1,14 @@
 from isaaclab.sim import configclass
 
-from uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.rl_state_cfg import Ur5eRobotiq2f85RelCartesianOSCTrainCfg
+from uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.rl_state_cfg import Ur5eRobotiq2f85RelCartesianOSCTrainCfg, TrainEventCfg
 
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 
 from ... import mdp as task_mdp
+
 
 
 @configclass
@@ -83,6 +85,14 @@ class PrivilegedPolicyCfg(ObsGroup):
         func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
     )
 
+    robot_joint_dynamic_friction = ObsTerm(
+        func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+
+    robot_joint_viscous_friction = ObsTerm(
+        func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+
     robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
 
     def __post_init__(self):
@@ -91,8 +101,34 @@ class PrivilegedPolicyCfg(ObsGroup):
         self.history_length = 1
 
 @configclass
+class RandomizeGainsTrainEventsCfg(TrainEventCfg):
+    # We randomize over a large domain of values for the arm dynamics, including sys-ided values
+    # a bit of cheating lol
+
+    randomize_arm_sysid = EventTerm(
+        func=task_mdp.randomize_arm_from_sysid_fixed,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "joint_names": [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ],
+            "actuator_name": "arm",
+            "scale_range": (0.1, 0.3),
+            "delay_range": (0, 0),
+        },
+    )
+
+@configclass
 class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesianOSCTrainCfg):
     """Privileged observation training configuration for the UR5e + Robotiq 2F-85 robot."""
+
+    events: RandomizeGainsTrainEventsCfg = RandomizeGainsTrainEventsCfg()
 
     def __post_init__(self):
         super().__post_init__()

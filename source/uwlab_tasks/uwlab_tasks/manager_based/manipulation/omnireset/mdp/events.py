@@ -1553,14 +1553,15 @@ class randomize_arm_from_sysid(ManagerTermBase):
 
         # Motor delay scaled by ADR progress (if actuator supports it)
         delay_lo, delay_hi = delay_range
-        actuator = self.robot.actuators[self.actuator_name]
-        if hasattr(actuator, "positions_delay_buffer"):
-            effective_hi = int(round(p * delay_hi))
-            effective_lo = min(delay_lo, effective_hi)
-            delays = torch.randint(effective_lo, effective_hi + 1, (N,), device=device, dtype=torch.int)
-            actuator.positions_delay_buffer.set_time_lag(delays, env_ids)
-            actuator.velocities_delay_buffer.set_time_lag(delays, env_ids)
-            actuator.efforts_delay_buffer.set_time_lag(delays, env_ids)
+        if delay_hi > 0:
+            actuator = self.robot.actuators[self.actuator_name]
+            if hasattr(actuator, "positions_delay_buffer"):
+                effective_hi = int(round(p * delay_hi))
+                effective_lo = min(delay_lo, effective_hi)
+                delays = torch.randint(effective_lo, effective_hi + 1, (N,), device=device, dtype=torch.int)
+                actuator.positions_delay_buffer.set_time_lag(delays, env_ids)
+                actuator.velocities_delay_buffer.set_time_lag(delays, env_ids)
+                actuator.efforts_delay_buffer.set_time_lag(delays, env_ids)
 
 
 class randomize_arm_from_sysid_fixed(randomize_arm_from_sysid):
