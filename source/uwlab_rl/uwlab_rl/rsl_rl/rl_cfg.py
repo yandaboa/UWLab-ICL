@@ -67,6 +67,10 @@ class RslRlFancyActorCriticCfg(RslRlPpoActorCriticCfg):
     noise_std_type: Literal["scalar", "log", "gsde"] = "scalar"
     """The type of noise standard deviation for the policy. Default is scalar."""
 
+    film_obs_key: str | None = None
+    """The observation group that's encoded into a latent space for feature wise linear modulation."""
+
+    film_hiddens: list[int] = [128]
 
 @configclass
 class RslRlFancyPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):

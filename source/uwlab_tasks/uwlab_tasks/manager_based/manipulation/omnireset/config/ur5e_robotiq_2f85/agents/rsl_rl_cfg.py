@@ -31,10 +31,13 @@ class Base_PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         actor_obs_normalization=True,
         critic_obs_normalization=True,
         actor_hidden_dims=[1024, 512, 256, 128],
+        film_hiddens=[256],
         critic_hidden_dims=[1024, 512, 256, 128],
         activation="elu",
         noise_std_type="gsde",
         state_dependent_std=False,
+        film_obs_key=None,
+        # film_obs_key="privileged_info",
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,

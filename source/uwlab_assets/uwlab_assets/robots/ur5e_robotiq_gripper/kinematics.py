@@ -59,7 +59,9 @@ def _load_calibration() -> dict[str, torch.Tensor]:
 
     usd_dir = os.path.dirname(UR5E_ARTICULATION.spawn.usd_path)
     meta_path = os.path.join(usd_dir, "metadata.yaml")
-    local = retrieve_file_path(meta_path, download_dir=tempfile.gettempdir())
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    download_dir = os.path.join(tempfile.gettempdir(), "uwlab_meta_cache", f"gpu{local_rank}")
+    local = retrieve_file_path(meta_path, download_dir=download_dir)
     with open(local) as f:
         metadata = yaml.safe_load(f)
     if metadata is None:

@@ -98,7 +98,48 @@ class PrivilegedPolicyCfg(ObsGroup):
     robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
 
     def __post_init__(self):
-        self.enable_corruption = True
+        self.enable_corruption = False
+        self.concatenate_terms = False
+        self.history_length = 1
+
+@configclass
+class PrivilegedInfoObservationCfg(ObsGroup):
+    """Privileged information observations for the UR5e + Robotiq 2F-85 robot."""
+
+    robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    insertive_object_mass = ObsTerm(
+        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    )
+
+    receptive_object_mass = ObsTerm(
+        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    )
+
+    table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
+
+    robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    robot_joint_stiffness = ObsTerm(
+        func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+
+    robot_joint_dynamic_friction = ObsTerm(
+        func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+
+    robot_joint_viscous_friction = ObsTerm(
+        func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+
+    robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
+
+    robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    def __post_init__(self):
+        self.enable_corruption = False
         self.concatenate_terms = True
         self.history_length = 1
 
@@ -121,7 +162,7 @@ class RandomizeGainsTrainEventsCfg(TrainEventCfg):
                 "wrist_3_joint",
             ],
             "actuator_name": "arm",
-            "scale_range": (0.1, 1.2),
+            "scale_range": (0.1, 0.3),
             "delay_range": (0, 0),
         },
     )
@@ -148,3 +189,4 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesi
         super().__post_init__()
 
         self.observations.policy = PrivilegedPolicyCfg()
+        # self.observations.privileged_info = PrivilegedInfoObservationCfg()
