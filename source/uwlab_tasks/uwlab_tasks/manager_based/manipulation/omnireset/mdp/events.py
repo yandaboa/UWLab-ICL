@@ -1734,6 +1734,30 @@ class randomize_rel_cartesian_osc_gains_fixed(randomize_rel_cartesian_osc_gains)
         super().__init__(cfg, env)
         self.scale_progress = 1.0
 
+class randomize_action_term_fields(randomize_rel_cartesian_osc_gains_fixed):
+    """Same as randomize_rel_cartesian_osc_gains_fixed but also randomizes over other action term fields, specifically scale."""
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+    
+    def __call__(
+        self,
+        env: ManagerBasedEnv,
+        env_ids,
+        action_name: str,
+        action_scale_scale_range: tuple[float, float] = (0.8, 1.2),
+        kp_scale_range: tuple[float, float] = (0.8, 1.2),
+        terminal_kp: tuple[float, ...] | None = None,
+        terminal_damping_ratio: tuple[float, ...] | None = None,
+        initial_scale_progress: float = 0.0,
+    ) -> None:
+        super().__call__(env, env_ids, action_name, scale_range=action_scale_scale_range, terminal_kp=terminal_kp, terminal_damping_ratio=terminal_damping_ratio, initial_scale_progress=initial_scale_progress)
+
+        # randomize around default action scale
+        lo, hi = action_scale_scale_range
+        n = len(env_ids)
+        s_scale = lo + torch.rand(n, 1, device=env.device) * (hi - lo)
+        new_scale = self._action_term._scale_default.unsqueeze(0).repeat(n, 1) * s_scale
+        self._action_term._scale[env_ids] = new_scale
 
 class adr_sysid_curriculum(ManagerTermBase):
     """Automatic Domain Randomization curriculum for sysid event terms.

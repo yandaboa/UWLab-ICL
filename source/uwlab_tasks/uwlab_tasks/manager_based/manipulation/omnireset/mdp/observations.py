@@ -14,7 +14,7 @@ from isaaclab.sensors import Camera, RayCasterCamera, TiledCamera
 
 from uwlab_tasks.manager_based.manipulation.omnireset.assembly_keypoints import Offset
 from uwlab_tasks.manager_based.manipulation.omnireset.mdp import utils
-
+from uwlab_tasks.manager_based.manipulation.omnireset.mdp.actions.task_space_actions import RelCartesianOSCAction
 
 def target_asset_pose_in_root_asset_frame(
     env: ManagerBasedEnv,
@@ -207,6 +207,25 @@ def get_joint_damping(
     asset: RigidObject | Articulation = env.scene[asset_cfg.name]
     return asset.data.joint_damping.view(env.num_envs, -1)
 
+def get_osc_gains(
+    env: ManagerBasedRLEnv,
+    action_name: str
+):
+    action_term = env.action_manager._terms.get(action_name)
+    if action_term is None or not isinstance(action_term, RelCartesianOSCAction):
+        raise ValueError(f"Action term '{action_name}' is not a RelCartesianOSCAction.")
+    kp = action_term._kp
+    kd = action_term._kd
+    return torch.cat([kp, kd], dim=-1)
+
+def get_action_scale(
+    env: ManagerBasedRLEnv,
+    action_name: str
+):
+    action_term = env.action_manager._terms.get(action_name)
+    if action_term is None or not isinstance(action_term, RelCartesianOSCAction):
+        raise ValueError(f"Action term '{action_name}' is not a RelCartesianOSCAction.")
+    return action_term._scale
 
 def time_left(env) -> torch.Tensor:
     if hasattr(env, "episode_length_buf"):

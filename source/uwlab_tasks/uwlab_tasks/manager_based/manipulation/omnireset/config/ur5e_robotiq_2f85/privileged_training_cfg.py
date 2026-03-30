@@ -93,6 +93,8 @@ class PrivilegedPolicyCfg(ObsGroup):
         func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
     )
 
+    robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
+
     robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
 
     def __post_init__(self):
@@ -102,7 +104,7 @@ class PrivilegedPolicyCfg(ObsGroup):
 
 @configclass
 class RandomizeGainsTrainEventsCfg(TrainEventCfg):
-    # We randomize over a large domain of values for the arm dynamics, including sys-ided values
+    # We randomize over a large domain of values for the arm dynamics + OSC controller, including sys-ided values
     # a bit of cheating lol
 
     randomize_arm_sysid = EventTerm(
@@ -119,8 +121,20 @@ class RandomizeGainsTrainEventsCfg(TrainEventCfg):
                 "wrist_3_joint",
             ],
             "actuator_name": "arm",
-            "scale_range": (0.1, 0.3),
+            "scale_range": (0.1, 1.2),
             "delay_range": (0, 0),
+        },
+    )
+
+    # this is based on pre-train gains. If we want coverage over sim2real gains (refer to UR5E_ROBOTIQ_2F85_RELATIVE_OSC_EVAL)
+    # we need to aggressively randomize
+    randomize_osc_gains = EventTerm(
+        func=task_mdp.randomize_action_term_fields,
+        mode="reset",
+        params={
+            "action_name": "arm",
+            "action_scale_scale_range": (0.8, 1.2),
+            # "kp_scale_range": (0.8, 1.2), We probably dont need to randomize over scale?
         },
     )
 

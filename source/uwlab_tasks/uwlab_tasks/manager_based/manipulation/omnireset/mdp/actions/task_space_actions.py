@@ -75,7 +75,8 @@ class RelCartesianOSCAction(ActionTerm):
         self._torque_max = torch.tensor(cfg.torque_limit, device=self.device, dtype=torch.float32)
 
         # Action scaling
-        self._scale = torch.tensor(cfg.scale_xyz_axisangle, device=self.device, dtype=torch.float32)
+        self._scale_default = torch.tensor(cfg.scale_xyz_axisangle, device=self.device, dtype=torch.float32)
+        self._scale = self._scale_default.unsqueeze(0).expand(self.num_envs, -1).clone()
         if cfg.input_clip is not None:
             self._input_clip = torch.tensor(cfg.input_clip, device=self.device, dtype=torch.float32)
         else:
