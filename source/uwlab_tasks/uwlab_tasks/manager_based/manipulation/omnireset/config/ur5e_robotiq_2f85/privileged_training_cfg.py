@@ -1,6 +1,6 @@
 from isaaclab.sim import configclass
 
-from uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.rl_state_cfg import Ur5eRobotiq2f85RelCartesianOSCTrainCfg, TrainEventCfg
+from uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.rl_state_cfg import Ur5eRobotiq2f85RelCartesianOSCTrainCfg, TrainEventCfg, ObservationsCfg
 
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -65,25 +65,14 @@ class PrivilegedPolicyCfg(ObsGroup):
         },
     )
 
-    robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
+    def __post_init__(self):
+        self.enable_corruption = False
+        self.concatenate_terms = False
+        self.history_length = 1
 
-    insertive_object_mass = ObsTerm(
-        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
-    )
-
-    receptive_object_mass = ObsTerm(
-        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
-    )
-
-    table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
-
-    robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
-
-    robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
-
-    robot_joint_stiffness = ObsTerm(
-        func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
-    )
+@configclass
+class PrivilegedCriticCfg(ObservationsCfg.CriticCfg):
+    """Privileged critic observations for the UR5e + Robotiq 2F-85 robot."""
 
     robot_joint_dynamic_friction = ObsTerm(
         func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
@@ -95,12 +84,8 @@ class PrivilegedPolicyCfg(ObsGroup):
 
     robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
 
-    robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
-
     def __post_init__(self):
-        self.enable_corruption = False
-        self.concatenate_terms = False
-        self.history_length = 1
+        super().__post_init__()
 
 @configclass
 class PrivilegedInfoObservationCfg(ObsGroup):
@@ -174,8 +159,8 @@ class RandomizeGainsTrainEventsCfg(TrainEventCfg):
         mode="reset",
         params={
             "action_name": "arm",
-            "action_scale_scale_range": (0.8, 1.2),
-            # "kp_scale_range": (0.8, 1.2), We probably dont need to randomize over scale?
+            # "action_scale_scale_range": (0.8, 1.2), We probably dont need to randomize over scale?
+            "kp_scale_range": (0.8, 5.0)
         },
     )
 
@@ -189,4 +174,5 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesi
         super().__post_init__()
 
         self.observations.policy = PrivilegedPolicyCfg()
-        # self.observations.privileged_info = PrivilegedInfoObservationCfg()
+        self.observations.critic = PrivilegedCriticCfg()
+        self.observations.privileged_info = PrivilegedInfoObservationCfg()

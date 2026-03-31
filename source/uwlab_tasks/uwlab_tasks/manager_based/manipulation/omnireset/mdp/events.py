@@ -1750,7 +1750,7 @@ class randomize_action_term_fields(randomize_rel_cartesian_osc_gains_fixed):
         terminal_damping_ratio: tuple[float, ...] | None = None,
         initial_scale_progress: float = 0.0,
     ) -> None:
-        super().__call__(env, env_ids, action_name, scale_range=action_scale_scale_range, terminal_kp=terminal_kp, terminal_damping_ratio=terminal_damping_ratio, initial_scale_progress=initial_scale_progress)
+        super().__call__(env, env_ids, action_name, scale_range=kp_scale_range, terminal_kp=terminal_kp, terminal_damping_ratio=terminal_damping_ratio, initial_scale_progress=initial_scale_progress)
 
         # randomize around default action scale
         lo, hi = action_scale_scale_range
