@@ -227,6 +227,20 @@ def get_action_scale(
         raise ValueError(f"Action term '{action_name}' is not a RelCartesianOSCAction.")
     return action_term._scale
 
+def get_action_delay(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    actuator_name: str
+):
+    robot: Articulation = env.scene[asset_cfg.name]
+    actuator = robot.actuators[actuator_name]
+    p = actuator.positions_delay_buffer.time_lags().unsqueeze(-1)
+    v = actuator.velocities_delay_buffer.time_lags().unsqueeze(-1)
+    e = actuator.efforts_delay_buffer.time_lags().unsqueeze(-1)
+    assert p.ndim == 2 and p.shape[1] == 1
+    assert p.shape == v.shape == e.shape
+    return torch.cat([p, v, e], dim=-1)
+
 def time_left(env) -> torch.Tensor:
     if hasattr(env, "episode_length_buf"):
         life_left = 1 - (env.episode_length_buf.float() / env.max_episode_length)

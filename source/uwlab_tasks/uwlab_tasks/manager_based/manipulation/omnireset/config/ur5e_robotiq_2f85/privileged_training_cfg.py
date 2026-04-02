@@ -65,6 +65,40 @@ class PrivilegedPolicyCfg(ObsGroup):
         },
     )
 
+    robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    insertive_object_mass = ObsTerm(
+        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    )
+
+    receptive_object_mass = ObsTerm(
+        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    )
+
+    table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
+
+    robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    robot_joint_stiffness = ObsTerm(
+        func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+
+    robot_joint_dynamic_friction = ObsTerm(
+        func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+
+    robot_joint_viscous_friction = ObsTerm(
+        func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
+
+    robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
+
+    robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
+
     def __post_init__(self):
         self.enable_corruption = False
         self.concatenate_terms = False
@@ -83,6 +117,8 @@ class PrivilegedCriticCfg(ObservationsCfg.CriticCfg):
     )
 
     robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
+
+    robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
 
     def __post_init__(self):
         super().__post_init__()
@@ -123,6 +159,8 @@ class PrivilegedInfoObservationCfg(ObsGroup):
 
     robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
 
+    robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
+
     def __post_init__(self):
         self.enable_corruption = False
         self.concatenate_terms = True
@@ -133,8 +171,27 @@ class RandomizeGainsTrainEventsCfg(TrainEventCfg):
     # We randomize over a large domain of values for the arm dynamics + OSC controller, including sys-ided values
     # a bit of cheating lol
 
-    randomize_arm_sysid = EventTerm(
-        func=task_mdp.randomize_arm_from_sysid_fixed,
+    # randomize_arm_sysid = EventTerm(
+    #     func=task_mdp.randomize_arm_from_sysid_fixed,
+    #     mode="reset",
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("robot"),
+    #         "joint_names": [
+    #             "shoulder_pan_joint",
+    #             "shoulder_lift_joint",
+    #             "elbow_joint",
+    #             "wrist_1_joint",
+    #             "wrist_2_joint",
+    #             "wrist_3_joint",
+    #         ],
+    #         "actuator_name": "arm",
+    #         "scale_range": (0.1, 1.2),
+    #         "delay_range": (0, 0),
+    #     },
+    # )
+
+    randomize_env_cfg_unified = EventTerm(
+        func=task_mdp.randomize_env_cfg_unified,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot"),
@@ -147,22 +204,30 @@ class RandomizeGainsTrainEventsCfg(TrainEventCfg):
                 "wrist_3_joint",
             ],
             "actuator_name": "arm",
-            "scale_range": (0.1, 0.3),
+            "action_name": "arm",
+            "arm_scale_range": (0.8, 1.2),
             "delay_range": (0, 0),
+            "kp_scale_range": (0.8, 1.2),
+            "terminal_kp": (1000.0, 1000.0, 1000.0, 50.0, 50.0, 50.0),
+            "terminal_damping_ratio": (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+            "initial_scales": (0.02, 0.02, 0.02, 0.02, 0.02, 0.2),
+            "target_scales": (0.01, 0.01, 0.002, 0.02, 0.02, 0.2),
+            "coupled_progress_range": (0.0, 0.1),
+            "action_scale_progress_range": (0.0, 0.0),
         },
     )
 
     # this is based on pre-train gains. If we want coverage over sim2real gains (refer to UR5E_ROBOTIQ_2F85_RELATIVE_OSC_EVAL)
     # we need to aggressively randomize
-    randomize_osc_gains = EventTerm(
-        func=task_mdp.randomize_action_term_fields,
-        mode="reset",
-        params={
-            "action_name": "arm",
-            # "action_scale_scale_range": (0.8, 1.2), We probably dont need to randomize over scale?
-            "kp_scale_range": (0.8, 5.0)
-        },
-    )
+    # randomize_osc_gains = EventTerm(
+    #     func=task_mdp.randomize_action_term_fields,
+    #     mode="reset",
+    #     params={
+    #         "action_name": "arm",
+    #         # "action_scale_scale_range": (0.8, 1.2), We probably dont need to randomize over scale?
+    #         "kp_scale_range": (0.8, 5.0)
+    #     },
+    # )
 
 @configclass
 class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesianOSCTrainCfg):
@@ -175,4 +240,4 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesi
 
         self.observations.policy = PrivilegedPolicyCfg()
         self.observations.critic = PrivilegedCriticCfg()
-        self.observations.privileged_info = PrivilegedInfoObservationCfg()
+        # self.observations.privileged_info = PrivilegedInfoObservationCfg()

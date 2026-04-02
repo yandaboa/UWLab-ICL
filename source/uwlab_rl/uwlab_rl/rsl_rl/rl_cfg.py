@@ -70,6 +70,9 @@ class RslRlFancyActorCriticCfg(RslRlPpoActorCriticCfg):
     film_obs_key: str | None = None
     """The observation group that's encoded into a latent space for feature wise linear modulation."""
 
+    film_application_mode: Literal["actor", "critic", "both"] = "actor"
+    """Where FiLM is applied when `film_obs_key` is provided."""
+
     film_hiddens: list[int] = [128]
 
 @configclass
@@ -81,3 +84,6 @@ class RslRlFancyPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
     offline_algorithm_cfg: OffPolicyAlgorithmCfg | None = None
     """The configuration for the offline algorithms."""
+
+    weight_decay: float = 0.0
+    """The weight decay for the optimizer."""

@@ -30,16 +30,17 @@ class Base_PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         init_noise_std=1.0,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
-        actor_hidden_dims=[512, 256, 128, 64],
+        # actor_hidden_dims=[512, 256, 128, 64],
+        actor_hidden_dims=[1024, 512, 256, 128],
         film_hiddens=[512, 512],
         critic_hidden_dims=[1024, 512, 256, 128],
         activation="elu",
         noise_std_type="gsde",
         state_dependent_std=False,
-        # film_obs_key=None,
-        film_obs_key="privileged_info",
+        film_obs_key=None,
+        # film_obs_key="privileged_info",
     )
-    algorithm = RslRlPpoAlgorithmCfg(
+    algorithm = RslRlFancyPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         normalize_advantage_per_mini_batch=False,
@@ -53,6 +54,7 @@ class Base_PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
+        weight_decay=0.0,
     )
 
 
