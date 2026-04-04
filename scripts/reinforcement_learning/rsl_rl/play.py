@@ -8,6 +8,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+from pathlib import Path
 import sys
 
 from isaaclab.app import AppLauncher
@@ -33,7 +34,20 @@ parser.add_argument(
     action="store_true",
     help="Use the pre-trained checkpoint from Nucleus.",
 )
+parser.add_argument("--num_steps", type=int, default=None, help="Number of steps to simulate.")
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--save_rollout",
+    action="store_true",
+    default=False,
+    help="If set, save rollout policy observations and actions to log_dir/rollouts/play/<timestamp>.pt.",
+)
+parser.add_argument(
+    "--save_rollout_steps",
+    type=int,
+    default=0,
+    help="Number of inference steps to log for rollout. If <= 0, logs until simulation exits.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -80,6 +94,17 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from uwlab_tasks.utils.hydra import hydra_task_config
 
 # PLACEHOLDER: Extension template (do not remove this comment)
+
+
+def _to_cpu_detached(value):
+    """Convert tensors/nested structures to CPU tensors for serialization."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {k: _to_cpu_detached(v) for k, v in value.items()}
+    if hasattr(value, "items"):
+        return {k: _to_cpu_detached(v) for k, v in value.items()}
+    return value
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -174,35 +199,75 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
-    export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+    # export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
+    # export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
 
     # reset environment
     obs = env.get_observations()
     timestep = 0
+    rollout_data = None
+    rollout_save_path = None
+    if args_cli.save_rollout:
+        rollout_timestamp = time.strftime("%Y%m%d_%H%M%S")
+        rollout_save_path = Path(log_dir) / "rollouts" / "play" / f"{rollout_timestamp}.pt"
+        rollout_data = {
+            "policy_obs": [],
+            "actions": [],
+            "task": args_cli.task,
+            "checkpoint": str(resume_path),
+        }
     # simulate environment
+    num_episodes = 0
+    num_successes = 0
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
+            if rollout_data is not None:
+                rollout_data["policy_obs"].append(_to_cpu_detached(obs))
             # agent stepping
             actions = policy(obs)
+            if rollout_data is not None:
+                rollout_data["actions"].append(_to_cpu_detached(actions))
             # env stepping
-            obs, _, dones, _ = env.step(actions)
+            obs, rewards, dones, _ = env.step(actions)
+            if dones.any():
+                num_episodes += dones.sum().item()
+                num_successes += (rewards > 0.1).sum().item() 
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
+        
+        timestep += 1
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
+        
+        if args_cli.num_steps is not None and timestep >= args_cli.num_steps:
+            break
+        
+        if rollout_data is not None and args_cli.save_rollout_steps > 0 and timestep >= args_cli.save_rollout_steps:
+            print(f"[INFO] Collected requested rollout steps: {args_cli.save_rollout_steps}")
+            break
 
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    if rollout_data is not None:
+        rollout_save_path.parent.mkdir(parents=True, exist_ok=True)
+        rollout_data["num_steps"] = len(rollout_data["actions"])
+        rollout_data["dt"] = dt
+        torch.save(rollout_data, rollout_save_path)
+        print(f"[INFO] Saved rollout to: {rollout_save_path}")
+
+    print(f"Number of episodes: {num_episodes}")
+    print(f"Number of successes: {num_successes}")
+    if num_episodes:
+        print(f"Success rate: {num_successes / num_episodes:.2%}")
 
     # close the simulator
     env.close()

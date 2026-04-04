@@ -65,39 +65,39 @@ class PrivilegedPolicyCfg(ObsGroup):
         },
     )
 
-    # robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
+    robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    # insertive_object_mass = ObsTerm(
-    #     func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
-    # )
+    insertive_object_mass = ObsTerm(
+        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    )
 
-    # receptive_object_mass = ObsTerm(
-    #     func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
-    # )
+    receptive_object_mass = ObsTerm(
+        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    )
 
-    # table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
+    table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
 
-    # robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
+    robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    # robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
+    robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    # robot_joint_stiffness = ObsTerm(
-    #     func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
-    # )
+    robot_joint_stiffness = ObsTerm(
+        func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
 
-    # robot_joint_dynamic_friction = ObsTerm(
-    #     func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
-    # )
+    robot_joint_dynamic_friction = ObsTerm(
+        func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
 
-    # robot_joint_viscous_friction = ObsTerm(
-    #     func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
-    # )
+    robot_joint_viscous_friction = ObsTerm(
+        func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
 
-    # robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
+    robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
 
-    # robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
+    robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    # robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
+    robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
 
     def __post_init__(self):
         self.enable_corruption = False

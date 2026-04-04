@@ -287,7 +287,8 @@ class FinetuneEvalEventCfg(BaseEventCfg):
             ],
             "actuator_name": "arm",
             "scale_range": (0.8, 1.2),
-            "delay_range": (0, 1),
+            "delay_range": (0, 0),
+            # "delay_range": (0, 1),
         },
     )
 
