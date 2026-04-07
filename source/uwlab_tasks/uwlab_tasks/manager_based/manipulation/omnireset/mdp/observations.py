@@ -234,9 +234,9 @@ def get_action_delay(
 ):
     robot: Articulation = env.scene[asset_cfg.name]
     actuator = robot.actuators[actuator_name]
-    p = actuator.positions_delay_buffer.time_lags().unsqueeze(-1)
-    v = actuator.velocities_delay_buffer.time_lags().unsqueeze(-1)
-    e = actuator.efforts_delay_buffer.time_lags().unsqueeze(-1)
+    p = actuator.positions_delay_buffer.time_lags.unsqueeze(-1)
+    v = actuator.velocities_delay_buffer.time_lags.unsqueeze(-1)
+    e = actuator.efforts_delay_buffer.time_lags.unsqueeze(-1)
     assert p.ndim == 2 and p.shape[1] == 1
     assert p.shape == v.shape == e.shape
     return torch.cat([p, v, e], dim=-1)

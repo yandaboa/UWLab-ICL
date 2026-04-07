@@ -1,6 +1,7 @@
 from isaaclab.sim import configclass
 
 from uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.rl_state_cfg import Ur5eRobotiq2f85RelCartesianOSCTrainCfg, TrainEventCfg, ObservationsCfg, Ur5eRobotiq2f85RelCartesianOSCFinetuneEvalCfg
+from uwlab_assets.robots.ur5e_robotiq_gripper.ur5e_robotiq_2f85_gripper import EXPLICIT_UR5E_ROBOTIQ_2F85
 
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -65,39 +66,53 @@ class PrivilegedPolicyCfg(ObsGroup):
         },
     )
 
-    robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
+    # insertive_object_material_properties = ObsTerm(
+    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    # )
 
-    insertive_object_mass = ObsTerm(
-        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
-    )
+    # receptive_object_material_properties = ObsTerm(
+    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    # )
 
-    receptive_object_mass = ObsTerm(
-        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
-    )
+    # table_material_properties = ObsTerm(
+    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("table")}
+    # )
 
-    table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
+    # robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
+    # insertive_object_mass = ObsTerm(
+    #     func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    # )
 
-    robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
+    # receptive_object_mass = ObsTerm(
+    #     func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    # )
 
-    robot_joint_stiffness = ObsTerm(
-        func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
-    )
+    # table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
 
-    robot_joint_dynamic_friction = ObsTerm(
-        func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
-    )
+    # robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    robot_joint_viscous_friction = ObsTerm(
-        func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
-    )
+    # robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
+    # robot_joint_stiffness = ObsTerm(
+    #     func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
+    # )
 
-    robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
+    # robot_joint_dynamic_friction = ObsTerm(
+    #     func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    # )
 
-    robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
+    # robot_joint_viscous_friction = ObsTerm(
+    #     func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    # )
+
+    # robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
+
+    # robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
+
+    # robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
+
+    # robot_delay = ObsTerm(func=task_mdp.get_action_delay, params={"asset_cfg": SceneEntityCfg("robot"), "actuator_name": "arm"})
 
     def __post_init__(self):
         self.enable_corruption = False
@@ -119,6 +134,8 @@ class PrivilegedCriticCfg(ObservationsCfg.CriticCfg):
     robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
 
     robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
+
+    robot_delay = ObsTerm(func=task_mdp.get_action_delay, params={"asset_cfg": SceneEntityCfg("robot"), "actuator_name": "arm"})
 
     def __post_init__(self):
         super().__post_init__()
@@ -206,7 +223,7 @@ class RandomizeGainsTrainEventsCfg(TrainEventCfg):
             "actuator_name": "arm",
             "action_name": "arm",
             "arm_scale_range": (0.8, 1.2),
-            "delay_range": (0, 0),
+            "delay_range": (0, 1),
             "kp_scale_range": (0.8, 1.2),
             "terminal_kp": (1000.0, 1000.0, 1000.0, 50.0, 50.0, 50.0),
             "terminal_damping_ratio": (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
@@ -230,6 +247,86 @@ class RandomizeGainsTrainEventsCfg(TrainEventCfg):
     # )
 
 @configclass
+class RandomizeContactDynamicsTrainEventsCfg(TrainEventCfg):
+    """Randomize contact dynamics for the UR5e + Robotiq 2F-85 robot and the objects."""
+
+    insertive_object_material = EventTerm(
+        func=task_mdp.randomize_rigid_body_material,  # type: ignore
+        mode="startup",
+        params={
+            "static_friction_range": (0.1, 5.0),
+            "dynamic_friction_range": (0.1, 5.0),
+            "restitution_range": (0.0, 10.0),
+            "num_buckets": 100,
+            "asset_cfg": SceneEntityCfg("insertive_object"),
+            "make_consistent": True,
+        },
+    )
+
+    receptive_object_material = EventTerm(
+        func=task_mdp.randomize_rigid_body_material,  # type: ignore
+        mode="startup",
+        params={
+            "static_friction_range": (0.2, 1.0),
+            "dynamic_friction_range": (0.15, 1.0),
+            "restitution_range": (0.0, 10.0),
+            "num_buckets": 256,
+            "asset_cfg": SceneEntityCfg("receptive_object"),
+            "make_consistent": True,
+        },
+    )
+
+    table_material = EventTerm(
+        func=task_mdp.randomize_rigid_body_material,  # type: ignore
+        mode="startup",
+        params={
+            "static_friction_range": (0.3, 0.6),
+            "dynamic_friction_range": (0.2, 0.5),
+            "restitution_range": (0.0, 10.0),
+            "num_buckets": 256,
+            "asset_cfg": SceneEntityCfg("table"),
+            "make_consistent": True,
+        },
+    )
+
+    randomize_robot_mass = EventTerm(
+        func=task_mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "mass_distribution_params": (0.7, 1.3),
+            "operation": "scale",
+            "distribution": "uniform",
+            "recompute_inertia": True,
+        },
+    )
+
+    randomize_insertive_object_mass = EventTerm(
+        func=task_mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("insertive_object"),
+            # we assume insertive object is somewhere between 20g and 200g
+            "mass_distribution_params": (0.02, 0.2),
+            "operation": "abs",
+            "distribution": "uniform",
+            "recompute_inertia": True,
+        },
+    )
+
+    randomize_receptive_object_mass = EventTerm(
+        func=task_mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("receptive_object"),
+            "mass_distribution_params": (0.5, 3.0),
+            "operation": "scale",
+            "distribution": "uniform",
+            "recompute_inertia": True,
+        },
+    )
+
+@configclass
 class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesianOSCTrainCfg):
     """Privileged observation training configuration for the UR5e + Robotiq 2F-85 robot."""
 
@@ -240,8 +337,17 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesi
 
         self.observations.policy = PrivilegedPolicyCfg()
         self.observations.critic = PrivilegedCriticCfg()
+        self.scene.robot = EXPLICIT_UR5E_ROBOTIQ_2F85.replace(prim_path="{ENV_REGEX_NS}/Robot")
         # self.observations.privileged_info = PrivilegedInfoObservationCfg()
 
+@configclass
+class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainWithContactDynamicsCfg(Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg):
+    """Privileged observation training configuration for the UR5e + Robotiq 2F-85 robot with contact dynamics."""
+
+    events: RandomizeContactDynamicsTrainEventsCfg = RandomizeContactDynamicsTrainEventsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
 @configclass
 class Ur5eRobotiq2f85RelCartesianOSCPrivilegedEvalCfg(Ur5eRobotiq2f85RelCartesianOSCFinetuneEvalCfg):
     """Privileged observation evaluation configuration for the UR5e + Robotiq 2F-85 robot."""
