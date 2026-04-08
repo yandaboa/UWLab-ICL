@@ -48,7 +48,7 @@ class RGBTrainingObservationsCfg(RGBObservationsCfg.RGBPolicyCfg):
     )
 
 @configclass
-class RGBTrainingObservationsCfg:
+class TrainingObservationsCfg:
     policy: RGBTrainingObservationsCfg = RGBTrainingObservationsCfg()
     critic: ObservationsCfg.CriticCfg = ObservationsCfg.CriticCfg()
     expert: ObservationsCfg.PolicyCfg = ObservationsCfg.PolicyCfg()
@@ -271,7 +271,7 @@ class RGBTrainingEventsCfg(BaseRGBEventCfg):
 
 @configclass
 class RGBUr5eRobotiq2f85RelCartesianOSCTrainCfg(Ur5eRobotiq2f85RGBRelCartesianOSCEvalCfg):
-    observations : RGBTrainingObservationsCfg = RGBTrainingObservationsCfg()
+    observations : TrainingObservationsCfg = TrainingObservationsCfg()
     terminations: RGBTerminationsCfg = RGBTerminationsCfg()
     events: RGBTrainingEventsCfg = RGBTrainingEventsCfg()
 

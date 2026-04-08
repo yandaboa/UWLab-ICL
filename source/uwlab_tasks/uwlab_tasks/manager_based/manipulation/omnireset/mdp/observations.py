@@ -203,6 +203,12 @@ def time_left(env) -> torch.Tensor:
     return life_left.view(-1, 1)
 
 
+def ray_hit_distances(env, sensor_cfg) -> torch.Tensor:
+    """Return distance from sensor to each ray hit."""
+    sensor = env.scene.sensors[sensor_cfg.name]
+    diff = sensor.data.ray_hits_w - sensor.data.pos_w.unsqueeze(1)
+    return torch.norm(diff, dim=-1)  # (num_envs, num_rays)
+
 def process_image(
     env: ManagerBasedEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("tiled_camera"),
