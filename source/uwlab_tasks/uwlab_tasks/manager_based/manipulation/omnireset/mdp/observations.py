@@ -202,12 +202,11 @@ def time_left(env) -> torch.Tensor:
         life_left = torch.zeros(env.num_envs, device=env.device, dtype=torch.float)
     return life_left.view(-1, 1)
 
-
-def ray_hit_distances(env, sensor_cfg) -> torch.Tensor:
-    """Return distance from sensor to each ray hit."""
+def distance_to_camera(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Return the distance-to-camera image flattened per env."""
     sensor = env.scene.sensors[sensor_cfg.name]
-    diff = sensor.data.ray_hits_w - sensor.data.pos_w.unsqueeze(1)
-    return torch.norm(diff, dim=-1)  # (num_envs, num_rays)
+    # shape is (num_envs, H, W, 1) → squeeze to (num_envs, H, W)
+    return sensor.data.output["distance_to_image_plane"].squeeze(-1)
 
 def process_image(
     env: ManagerBasedEnv,
