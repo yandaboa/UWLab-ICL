@@ -1,0 +1,7 @@
+[submodule "diffusion_policy"]
+	path = diffusion_policy
+	url = git@github.com:yandaboa/diffusion_policy.git
+	branch = sriyash/distillation
+[submodule "rsl_rl"]
+	path = rsl_rl
+	url = git@github.com:yandaboa/rsl_rl.git
