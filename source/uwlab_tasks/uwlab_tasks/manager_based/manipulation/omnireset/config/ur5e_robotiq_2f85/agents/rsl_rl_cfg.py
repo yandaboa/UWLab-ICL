@@ -21,7 +21,7 @@ def my_experts_observation_func(env):
 
 @configclass
 class Base_PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 32
+    num_steps_per_env = 16 # use 32 if on 4 GPUs, 16 is fine otherwise
     max_iterations = 40000
     save_interval = 100
     resume = False
