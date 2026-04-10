@@ -79,6 +79,13 @@ class PreStepDataCollectionObservationsRecorderCfg(RecorderTermCfg):
 
 
 @configclass
+class PreStepExpertMaskRecorderCfg(RecorderTermCfg):
+    """Configuration for the expert action mask recorder term."""
+
+    class_type: type[RecorderTerm] = recorders.PreStepExpertMaskRecorder
+
+
+@configclass
 class ActionStateRecorderManagerCfg(RecorderManagerBaseCfg):
     """Recorder manager that records raw actions and observations for data collection."""
 
@@ -86,3 +93,14 @@ class ActionStateRecorderManagerCfg(RecorderManagerBaseCfg):
     record_post_step_states = PostStepStatesRecorderCfg()
     record_pre_step_actions = PreStepActionsRecorderCfg()
     record_pre_step_data_collection_observations = PreStepDataCollectionObservationsRecorderCfg()
+
+
+@configclass
+class ActionStateRecorderManagerTransformedActionCfg(RecorderManagerBaseCfg):
+    """Recorder manager that also records expert-vs-exploration masks."""
+
+    record_initial_state = InitialStateRecorderCfg()
+    record_post_step_states = PostStepStatesRecorderCfg()
+    record_pre_step_actions = PreStepActionsRecorderCfg()
+    record_pre_step_data_collection_observations = PreStepDataCollectionObservationsRecorderCfg()
+    record_pre_step_expert_mask = PreStepExpertMaskRecorderCfg()

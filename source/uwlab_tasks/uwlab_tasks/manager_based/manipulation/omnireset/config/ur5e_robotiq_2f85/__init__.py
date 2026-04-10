@@ -196,11 +196,31 @@ gym.register(
 )
 
 gym.register(
-    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-WithContactDynamics-Play-v0",
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-ContactDynamics-Play-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.privileged_training_cfg:Ur5eRobotiq2f85RelCartesianOSCPrivilegedEvalWithContactDynamicsCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Base_PPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-POMDP-ArmDynamics-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.privileged_training_cfg:Ur5eRobotiq2f85RelCartesianOSCArmDynamicsPOMDPTrainCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Asymmetric_DAggerRunnerCfg",
+    },
+)
+
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-POMDP-ContactDynamics-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.privileged_training_cfg:Ur5eRobotiq2f85RelCartesianOSCContactDynamicsPOMDPTrainCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Asymmetric_DAggerRunnerCfg",
     },
 )

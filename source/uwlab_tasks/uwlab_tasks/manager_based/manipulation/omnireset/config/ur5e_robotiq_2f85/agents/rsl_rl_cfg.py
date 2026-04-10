@@ -86,3 +86,33 @@ class Base_DAggerRunnerCfg(Base_PPORunnerCfg):
             )
         ),
     )
+
+
+@configclass
+class Asymmetric_DAggerRunnerCfg(Base_PPORunnerCfg):
+    algorithm = RslRlFancyPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        normalize_advantage_per_mini_batch=False,
+        clip_param=0.2,
+        entropy_coef=0.006,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+        offline_algorithm_cfg=OffPolicyAlgorithmCfg(
+            behavior_cloning_cfg=BehaviorCloningCfg(
+                experts_path=[""],
+                experts_loader="torch.jit.load",
+                experts_observation_group_cfg="uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.privileged_training_cfg:PrivilegedPolicyCfg",
+                experts_observation_func=my_experts_observation_func,
+                experts_action_group_cfg="uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.actions:Ur5eRobotiq2f85RelativeOSCAction",
+                cloning_loss_coeff=1.0,
+                loss_decay=1.0,
+            )
+        ),
+    )

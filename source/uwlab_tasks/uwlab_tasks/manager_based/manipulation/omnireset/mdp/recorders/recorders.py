@@ -84,3 +84,23 @@ class PreStepDataCollectionObservationsRecorder(RecorderTerm):
     def record_pre_step(self):
         """Record data collection observations from the data_collection observation group."""
         return "obs", self._env.obs_buf["data_collection"]
+
+
+class PreStepExpertMaskRecorder(RecorderTerm):
+    """Recorder term that stores whether each action came from the expert."""
+
+    def __init__(self, cfg, env):
+        super().__init__(cfg, env)
+        self._expert_mask = torch.ones((env.num_envs, 1), dtype=torch.bool, device=env.device)
+        self._exploration_horizon = None
+
+    def set_mask(self, expert_mask: torch.Tensor):
+        """Set the expert mask externally each environment step."""
+        self._expert_mask = expert_mask
+
+    def set_exploration_horizon(self, exploration_horizon: torch.Tensor):
+        """Parity setter retained from OctiLab; currently not used by recorder output."""
+        self._exploration_horizon = exploration_horizon
+
+    def record_pre_step(self):
+        return "expert_mask", self._expert_mask.clone()

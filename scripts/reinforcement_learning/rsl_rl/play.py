@@ -8,6 +8,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -48,6 +49,51 @@ parser.add_argument(
     default=0,
     help="Number of inference steps to log for rollout. If <= 0, logs until simulation exits.",
 )
+parser.add_argument(
+    "--plot_privileged_debug",
+    action="store_true",
+    default=False,
+    help=(
+        "If set, sweep privileged policy observations at each step and save overlaid action-distribution plots "
+        "for the single active environment."
+    ),
+)
+parser.add_argument(
+    "--privileged_debug_sweep_key",
+    type=str,
+    default="friction",
+    help=(
+        "Privileged material property to sweep across all insertive/receptive/table material terms. "
+        "Supported values: 'friction' and 'restitution'."
+    ),
+)
+parser.add_argument(
+    "--privileged_debug_sweep_min",
+    type=float,
+    default=None,
+    help="Optional minimum counterfactual value for the privileged debug sweep.",
+)
+parser.add_argument(
+    "--privileged_debug_sweep_max",
+    type=float,
+    default=None,
+    help="Optional maximum counterfactual value for the privileged debug sweep.",
+)
+parser.add_argument(
+    "--privileged_debug_num_points",
+    type=int,
+    default=9,
+    help="Number of counterfactual points to evaluate in each privileged debug sweep.",
+)
+parser.add_argument(
+    "--privileged_debug_joint_insertive_receptive",
+    action="store_true",
+    default=False,
+    help=(
+        "Also add a coupled sweep that varies insertive and receptive object privileged material properties "
+        "together with the same counterfactual value."
+    ),
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -71,6 +117,7 @@ import gymnasium as gym
 import os
 import time
 import torch
+from tqdm import tqdm
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -90,6 +137,7 @@ from uwlab_rl.rsl_rl.exporter import export_policy_as_jit, export_policy_as_onnx
 
 import isaaclab_tasks  # noqa: F401
 import uwlab_tasks  # noqa: F401
+from privileged_policy_debug import PrivilegedPolicyDebugger
 from isaaclab_tasks.utils import get_checkpoint_path
 from uwlab_tasks.utils.hydra import hydra_task_config
 
@@ -154,10 +202,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # wrap for video recording
     if args_cli.video:
+        video_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         video_kwargs = {
             "video_folder": os.path.join(log_dir, "videos", "play"),
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
+            "name_prefix": f"play-{video_timestamp}",
             "disable_logger": True,
         }
         print("[INFO] Recording videos during training.")
@@ -166,6 +216,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    if args_cli.plot_privileged_debug:
+        assert env.num_envs == 1, "--plot_privileged_debug requires --num_envs 1."
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
@@ -197,6 +249,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         normalizer = None
 
+    privileged_debugger = None
+    if args_cli.plot_privileged_debug:
+        if (args_cli.privileged_debug_sweep_min is None) != (args_cli.privileged_debug_sweep_max is None):
+            raise ValueError(
+                "Set both --privileged_debug_sweep_min and --privileged_debug_sweep_max, or leave both unset."
+            )
+        sweep_range = None
+        if args_cli.privileged_debug_sweep_min is not None and args_cli.privileged_debug_sweep_max is not None:
+            sweep_range = (args_cli.privileged_debug_sweep_min, args_cli.privileged_debug_sweep_max)
+        privileged_debugger = PrivilegedPolicyDebugger(
+            policy_nn,
+            Path(log_dir) / "privileged_debug",
+            sweep_key=args_cli.privileged_debug_sweep_key,
+            sweep_range=sweep_range,
+            num_sweep_points=args_cli.privileged_debug_num_points,
+            include_joint_insertive_receptive=args_cli.privileged_debug_joint_insertive_receptive,
+        )
+
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
     # export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
@@ -218,16 +288,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "task": args_cli.task,
             "checkpoint": str(resume_path),
         }
+    # infer a finite horizon for progress reporting when available
+    progress_total = None
+    if args_cli.video:
+        progress_total = args_cli.video_length
+    if args_cli.num_steps is not None:
+        progress_total = args_cli.num_steps if progress_total is None else min(progress_total, args_cli.num_steps)
+    if rollout_data is not None and args_cli.save_rollout_steps > 0:
+        progress_total = (
+            args_cli.save_rollout_steps if progress_total is None else min(progress_total, args_cli.save_rollout_steps)
+        )
+
     # simulate environment
     num_episodes = 0
     num_successes = 0
+    progress_bar = tqdm(total=progress_total, desc="Play rollout", unit="step")
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
             if rollout_data is not None:
                 rollout_data["policy_obs"].append(_to_cpu_detached(obs))
+            if privileged_debugger is not None:
+                privileged_debugger.plot_step(obs, timestep)
             # agent stepping
+            # obs["policy"]["insertive_object"]
             actions = policy(obs)
             if rollout_data is not None:
                 rollout_data["actions"].append(_to_cpu_detached(actions))
@@ -235,11 +320,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs, rewards, dones, _ = env.step(actions)
             if dones.any():
                 num_episodes += dones.sum().item()
-                num_successes += (rewards > 0.1).sum().item() 
+                num_successes += torch.logical_and(rewards > 0.1, dones).sum().item() 
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
         
         timestep += 1
+        progress_bar.update(1)
         if args_cli.video:
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
@@ -256,6 +342,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+    progress_bar.close()
+
+    if privileged_debugger is not None:
+        debug_video_num_steps = args_cli.num_steps if args_cli.num_steps is not None else timestep
+        privileged_debugger.save_time_series_videos(rollout_step_dt=dt, target_num_steps=debug_video_num_steps)
 
     if rollout_data is not None:
         rollout_save_path.parent.mkdir(parents=True, exist_ok=True)

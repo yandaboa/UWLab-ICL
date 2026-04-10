@@ -7,11 +7,70 @@ from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import TerminationTermCfg as DoneTerm
 
 from ... import mdp as task_mdp
-from uwlab_assets.uwlab_assets import UWLAB_CLOUD_ASSETS_DIR
+from uwlab_assets import UWLAB_CLOUD_ASSETS_DIR
 
 
+@configclass
+class BasePolicyCfg(ObsGroup):
+    """Base policy observations for the UR5e + Robotiq 2F-85 robot."""
+
+    prev_actions = ObsTerm(func=task_mdp.last_action)
+
+    joint_pos = ObsTerm(func=task_mdp.joint_pos)
+
+    joint_vel = ObsTerm(func=task_mdp.joint_vel)
+
+    end_effector_pose = ObsTerm(
+        func=task_mdp.target_asset_pose_in_root_asset_frame,
+        params={
+            "target_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+            "root_asset_cfg": SceneEntityCfg("robot"),
+            "rotation_repr": "axis_angle",
+        },
+    )
+
+    end_effector_vel_lin_ang_b = ObsTerm(
+        func=task_mdp.asset_link_velocity_in_root_asset_frame,
+        params={
+            "target_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+            "root_asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+    insertive_asset_pose = ObsTerm(
+        func=task_mdp.target_asset_pose_in_root_asset_frame,
+        params={
+            "target_asset_cfg": SceneEntityCfg("insertive_object"),
+            "root_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+            "rotation_repr": "axis_angle",
+        },
+    )
+
+    receptive_asset_pose = ObsTerm(
+        func=task_mdp.target_asset_pose_in_root_asset_frame,
+        params={
+            "target_asset_cfg": SceneEntityCfg("receptive_object"),
+            "root_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+            "rotation_repr": "axis_angle",
+        },
+    )
+
+    insertive_asset_in_receptive_asset_frame: ObsTerm = ObsTerm(
+        func=task_mdp.target_asset_pose_in_root_asset_frame,
+        params={
+            "target_asset_cfg": SceneEntityCfg("insertive_object"),
+            "root_asset_cfg": SceneEntityCfg("receptive_object"),
+            "rotation_repr": "axis_angle",
+        },
+    )
+
+    def __post_init__(self):
+        self.enable_corruption = False
+        self.concatenate_terms = False
+        self.history_length = 1
 
 @configclass
 class PrivilegedPolicyCfg(ObsGroup):
@@ -67,6 +126,8 @@ class PrivilegedPolicyCfg(ObsGroup):
         },
     )
 
+    """Contact Dynamics Observation Terms"""
+
     insertive_object_material_properties = ObsTerm(
         func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("insertive_object")}
     )
@@ -90,6 +151,8 @@ class PrivilegedPolicyCfg(ObsGroup):
     )
 
     table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
+
+    """Arm Dynamics Observation Terms"""
 
     # robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
 
@@ -255,8 +318,11 @@ class RandomizeContactDynamicsTrainEventsCfg(TrainEventCfg):
         func=task_mdp.randomize_rigid_body_material,  # type: ignore
         mode="reset",
         params={
-            "static_friction_range": (0.05, 5.0),
-            "dynamic_friction_range": (0.05, 5.0),
+            "static_friction_range": (0.2, 5.0),
+            "dynamic_friction_range": (0.2, 5.0),
+            # "static_friction_range": (0.0, 0.1),
+            # "dynamic_friction_range": (0.0, 0.1),
+            # "restitution_range": (0.0, 0.1),
             "restitution_range": (0.0, 0.75),
             "num_buckets": 100,
             "asset_cfg": SceneEntityCfg("insertive_object"),
@@ -268,8 +334,11 @@ class RandomizeContactDynamicsTrainEventsCfg(TrainEventCfg):
         func=task_mdp.randomize_rigid_body_material,  # type: ignore
         mode="reset",
         params={
-            "static_friction_range": (0.05, 1.0),
-            "dynamic_friction_range": (0.05, 1.0),
+            "static_friction_range": (0.2, 1.0),
+            "dynamic_friction_range": (0.2, 1.0),
+            # "static_friction_range": (0.0, 0.1),
+            # "dynamic_friction_range": (0.0, 0.1),
+            # "restitution_range": (0.0, 0.1),
             "restitution_range": (0.0, 0.75),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("receptive_object"),
@@ -281,8 +350,8 @@ class RandomizeContactDynamicsTrainEventsCfg(TrainEventCfg):
         func=task_mdp.randomize_rigid_body_material,  # type: ignore
         mode="reset",
         params={
-            "static_friction_range": (0.05, 1.0),
-            "dynamic_friction_range": (0.05, 1.0),
+            "static_friction_range": (0.2, 1.0),
+            "dynamic_friction_range": (0.2, 1.0),
             "restitution_range": (0.0, 0.75),
             "num_buckets": 256,
             "asset_cfg": SceneEntityCfg("table"),
@@ -384,3 +453,80 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedEvalCfg(Ur5eRobotiq2f85RelCartesia
         self.observations.policy = PrivilegedPolicyCfg()
         self.observations.critic = PrivilegedCriticCfg()
         # self.observations.privileged_info = PrivilegedInfoObservationCfg()
+
+@configclass
+class Ur5eRobotiq2f85RelCartesianOSCArmDynamicsPOMDPTrainCfg(Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg):
+    """No privileged information, massive arm dynamics randomization. Requires use of history"""
+
+    def __post_init__(self):
+        super().__post_init__()
+        
+        self.observations.policy = BasePolicyCfg()
+        self.terminations.success = DoneTerm(func=task_mdp.consecutive_success_state, params={"num_consecutive_successes": 10})
+        self.events.reset_from_reset_states = EventTerm(
+            func=task_mdp.MultiResetManager,
+            mode="reset",
+            params={
+                "dataset_dir": f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/OmniReset",
+                "reset_types": ["ObjectAnywhereEEAnywhere", "ObjectRestingEEGrasped", "ObjectAnywhereEEGrasped", "ObjectPartiallyAssembledEEGrasped"],
+                "probs": [0.25, 0.25, 0.25, 0.25],
+                "success": "env.reward_manager.get_term_cfg('progress_context').func.success",
+            },
+        )
+
+
+@configclass
+class Ur5eRobotiq2f85RelCartesianOSCArmDynamicsPOMDPEvalCfg(Ur5eRobotiq2f85RelCartesianOSCArmDynamicsPOMDPTrainCfg):
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.events.reset_from_reset_states = EventTerm(
+            func=task_mdp.MultiResetManager,
+            mode="reset",
+            params={
+                "dataset_dir": f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/OmniReset",
+                "reset_types": ["ObjectAnywhereEEAnywhere"],
+                "probs": [1.0],
+                "success": "env.reward_manager.get_term_cfg('progress_context').func.success",
+            },
+        )
+
+
+@configclass
+class Ur5eRobotiq2f85RelCartesianOSCContactDynamicsPOMDPTrainCfg(Ur5eRobotiq2f85RelCartesianOSCPrivilegedEvalWithContactDynamicsCfg):
+    """No privileged information, massive contact dynamics randomization. Requires use of history"""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.observations.policy = BasePolicyCfg()
+        self.terminations.success = DoneTerm(func=task_mdp.consecutive_success_state, params={"num_consecutive_successes": 10})
+        self.events.reset_from_reset_states = EventTerm(
+            func=task_mdp.MultiResetManager,
+            mode="reset",
+            params={
+                "dataset_dir": f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/OmniReset",
+                "reset_types": ["ObjectAnywhereEEAnywhere", "ObjectRestingEEGrasped", "ObjectAnywhereEEGrasped", "ObjectPartiallyAssembledEEGrasped"],
+                "probs": [0.25, 0.25, 0.25, 0.25],
+                "success": "env.reward_manager.get_term_cfg('progress_context').func.success",
+            },
+        )
+
+@configclass
+class Ur5eRobotiq2f85RelCartesianOSCContactDynamicsPOMDPEvalCfg(Ur5eRobotiq2f85RelCartesianOSCContactDynamicsPOMDPTrainCfg):
+    """No privileged information, massive contact dynamics randomization. Requires use of history"""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.events.reset_from_reset_states = EventTerm(
+            func=task_mdp.MultiResetManager,
+            mode="reset",
+            params={
+                "dataset_dir": f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/OmniReset",
+                "reset_types": ["ObjectAnywhereEEAnywhere"],
+                "probs": [1.0],
+                "success": "env.reward_manager.get_term_cfg('progress_context').func.success",
+            },
+        )
