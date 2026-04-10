@@ -128,29 +128,29 @@ class PrivilegedPolicyCfg(ObsGroup):
 
     """Contact Dynamics Observation Terms"""
 
-    insertive_object_material_properties = ObsTerm(
-        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("insertive_object")}
-    )
+    # insertive_object_material_properties = ObsTerm(
+    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    # )
 
-    receptive_object_material_properties = ObsTerm(
-        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("receptive_object")}
-    )
+    # receptive_object_material_properties = ObsTerm(
+    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    # )
 
-    table_material_properties = ObsTerm(
-        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("table")}
-    )
+    # table_material_properties = ObsTerm(
+    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("table")}
+    # )
 
-    robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
+    # robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    insertive_object_mass = ObsTerm(
-        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
-    )
+    # insertive_object_mass = ObsTerm(
+    #     func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    # )
 
-    receptive_object_mass = ObsTerm(
-        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
-    )
+    # receptive_object_mass = ObsTerm(
+    #     func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    # )
 
-    table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
+    # table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
 
     """Arm Dynamics Observation Terms"""
 
@@ -183,6 +183,7 @@ class PrivilegedPolicyCfg(ObsGroup):
         self.concatenate_terms = False
         self.history_length = 1
 
+
 @configclass
 class PrivilegedCriticCfg(ObservationsCfg.CriticCfg):
     """Privileged critic observations for the UR5e + Robotiq 2F-85 robot."""
@@ -208,6 +209,19 @@ class PrivilegedCriticCfg(ObservationsCfg.CriticCfg):
 class PrivilegedInfoObservationCfg(ObsGroup):
     """Privileged information observations for the UR5e + Robotiq 2F-85 robot."""
 
+    """Contact dynamics observations"""
+    insertive_object_material_properties = ObsTerm(
+        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    )
+
+    receptive_object_material_properties = ObsTerm(
+        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    )
+
+    table_material_properties = ObsTerm(
+        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("table")}
+    )
+
     robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
 
     insertive_object_mass = ObsTerm(
@@ -220,27 +234,28 @@ class PrivilegedInfoObservationCfg(ObsGroup):
 
     table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
 
-    robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
+    """Arm dynamics observations"""
+    # robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
+    # robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    robot_joint_stiffness = ObsTerm(
-        func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
-    )
+    # robot_joint_stiffness = ObsTerm(
+    #     func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
+    # )
 
-    robot_joint_dynamic_friction = ObsTerm(
-        func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
-    )
+    # robot_joint_dynamic_friction = ObsTerm(
+    #     func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    # )
 
-    robot_joint_viscous_friction = ObsTerm(
-        func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
-    )
+    # robot_joint_viscous_friction = ObsTerm(
+    #     func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    # )
 
-    robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
+    # robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
 
-    robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
+    # robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
+    # robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
 
     def __post_init__(self):
         self.enable_corruption = False
@@ -318,13 +333,13 @@ class RandomizeContactDynamicsTrainEventsCfg(TrainEventCfg):
         func=task_mdp.randomize_rigid_body_material,  # type: ignore
         mode="reset",
         params={
-            "static_friction_range": (0.2, 5.0),
-            "dynamic_friction_range": (0.2, 5.0),
+            "static_friction_range": (0.1, 5.0),
+            "dynamic_friction_range": (0.1, 5.0),
             # "static_friction_range": (0.0, 0.1),
             # "dynamic_friction_range": (0.0, 0.1),
             # "restitution_range": (0.0, 0.1),
-            "restitution_range": (0.0, 0.75),
-            "num_buckets": 100,
+            "restitution_range": (0.0, 0.5),
+            "num_buckets": 8192,
             "asset_cfg": SceneEntityCfg("insertive_object"),
             "make_consistent": True,
         },
@@ -334,13 +349,13 @@ class RandomizeContactDynamicsTrainEventsCfg(TrainEventCfg):
         func=task_mdp.randomize_rigid_body_material,  # type: ignore
         mode="reset",
         params={
-            "static_friction_range": (0.2, 1.0),
-            "dynamic_friction_range": (0.2, 1.0),
+            "static_friction_range": (0.1, 1.0),
+            "dynamic_friction_range": (0.1, 1.0),
             # "static_friction_range": (0.0, 0.1),
             # "dynamic_friction_range": (0.0, 0.1),
             # "restitution_range": (0.0, 0.1),
-            "restitution_range": (0.0, 0.75),
-            "num_buckets": 256,
+            "restitution_range": (0.0, 0.5),
+            "num_buckets": 8192,
             "asset_cfg": SceneEntityCfg("receptive_object"),
             "make_consistent": True,
         },
@@ -352,8 +367,8 @@ class RandomizeContactDynamicsTrainEventsCfg(TrainEventCfg):
         params={
             "static_friction_range": (0.2, 1.0),
             "dynamic_friction_range": (0.2, 1.0),
-            "restitution_range": (0.0, 0.75),
-            "num_buckets": 256,
+            "restitution_range": (0.0, 0.5),
+            "num_buckets": 8192,
             "asset_cfg": SceneEntityCfg("table"),
             "make_consistent": True,
         },
@@ -433,6 +448,8 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainWithContactDynamicsCfg(Ur5eRo
 
     def __post_init__(self):
         super().__post_init__()
+
+        self.observations.privileged_info = PrivilegedInfoObservationCfg()
 
 @configclass
 class Ur5eRobotiq2f85RelCartesianOSCPrivilegedEvalWithContactDynamicsCfg(Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg):

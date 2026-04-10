@@ -224,3 +224,13 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Asymmetric_DAggerRunnerCfg",
     },
 )
+
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-POMDP-ContactDynamics-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.privileged_training_cfg:Ur5eRobotiq2f85RelCartesianOSCContactDynamicsPOMDPEvalCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Asymmetric_DAggerRunnerCfg",
+    },
+)

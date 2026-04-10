@@ -36,18 +36,18 @@ python scripts/reinforcement_learning/rsl_rl/play.py     --task OmniReset-Ur5eRo
 ## Running ASTEROID:
 ```
 python run_incontext_exploration.py \
-    --data_task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-RGB-DataCollection-v0 \
-    --eval_task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-RGB-Play-v0 \
-    --expert_policy_checkpoint  \
-    --config_name baseline_pg_spoc.yaml \
+    --data_task OmniReset-Ur5eRobotiq2f85-POMDP-ContactDynamics-v0 \
+    --eval_task OmniReset-Ur5eRobotiq2f85-POMDP-ContactDynamics-Play-v0 \
+    --expert_policy_checkpoint /home/ubuntu/lti/UWLab-ICL/logs/rsl_rl/ur5e_robotiq_2f85_omnireset_agent/2026-04-08_18-31-13/model_3200.pt \
+    --config_name in_context_exploration_state.yaml \
     --output_dir logs/incontext_exploration \
     --exp_name incontext_exploration \
     --wandb_project incontext_exploration \
-    --num_demos 10 \
-    --num_data_envs 2 \
-    --num_eval_envs 2 \
-    --num_eval_episodes 10 \
+    --num_demos 10000 \
+    --num_data_envs 4096 \
+    --num_eval_envs 1024 \
+    --num_eval_episodes 2 \
     --max_iterations 3 \
-    --insertive_object peg \
-    --receptive_object peghole
+    --insertive_object fbdrawerbottom \
+    --receptive_object fbdrawerbox
 ```

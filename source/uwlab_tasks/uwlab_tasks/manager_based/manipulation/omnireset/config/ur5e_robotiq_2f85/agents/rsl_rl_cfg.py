@@ -32,6 +32,8 @@ class Base_PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         critic_obs_normalization=True,
         # actor_hidden_dims=[512, 256, 128, 64],
         actor_hidden_dims=[1024, 512, 256, 128],
+        privileged_obs_encoder_dims=[256, 128, 64],
+        use_privileged_obs_encoder=True,
         film_hiddens=[512, 512],
         critic_hidden_dims=[1024, 512, 256, 128],
         activation="elu",
