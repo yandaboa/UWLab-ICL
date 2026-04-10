@@ -75,6 +75,10 @@ class RslRlFancyActorCriticCfg(RslRlPpoActorCriticCfg):
 
     film_hiddens: list[int] = [128]
 
+    privileged_obs_encoder_dims: list[int] = [128]
+
+    use_privileged_obs_encoder: bool = False
+
 @configclass
 class RslRlFancyPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     """Configuration for the PPO algorithm."""

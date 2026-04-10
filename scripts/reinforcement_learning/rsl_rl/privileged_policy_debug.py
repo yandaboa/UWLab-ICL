@@ -319,6 +319,12 @@ class PrivilegedPolicyDebugger:
                 rollout_step_dt=rollout_step_dt,
                 target_num_steps=target_num_steps,
             )
+            self._save_average_variance_video(
+                history_key=history_key,
+                history=history,
+                rollout_step_dt=rollout_step_dt,
+                target_num_steps=target_num_steps,
+            )
 
     def _save_time_series_video(
         self,
@@ -410,3 +416,77 @@ class PrivilegedPolicyDebugger:
 
         imageio.mimsave(str(video_path), frames, fps=fps, codec="libx264")
         print(f"[INFO] Saved privileged debug time-series video to: {video_path}")
+
+    def _save_average_variance_video(
+        self,
+        history_key: str,
+        history: dict[str, Any],
+        rollout_step_dt: float,
+        target_num_steps: int | None = None,
+    ) -> None:
+        action_mean = torch.stack(history["action_mean"], dim=0).numpy()
+        time_values = np.asarray(history["times"], dtype=np.float32) * rollout_step_dt
+        target_name = history["target_name"]
+        component_label = history["component_label"]
+
+        num_frames = action_mean.shape[0]
+        if num_frames == 0:
+            return
+        total_steps = target_num_steps if target_num_steps is not None else num_frames
+        total_duration = max(total_steps * rollout_step_dt, rollout_step_dt)
+        fps = num_frames / total_duration
+
+        # Variance across privileged sweep values, then average across action dimensions.
+        avg_action_variance = np.var(action_mean, axis=1).mean(axis=-1)
+        y_min = float(np.min(avg_action_variance))
+        y_max = float(np.max(avg_action_variance))
+        y_pad = max(0.05 * (y_max - y_min), 1.0e-5)
+        if np.isclose(y_min, y_max):
+            y_min -= y_pad
+            y_max += y_pad
+
+        frames = []
+        save_dir = self._output_dir / component_label / target_name
+        save_dir.mkdir(parents=True, exist_ok=True)
+        video_path = save_dir / "average_action_variance_over_time.mp4"
+
+        for frame_idx in range(num_frames):
+            fig, axis = plt.subplots(figsize=(12, 5))
+            axis.plot(
+                time_values,
+                avg_action_variance,
+                color="tab:blue",
+                alpha=0.9,
+                linewidth=2.0,
+            )
+            axis.scatter(
+                time_values[frame_idx],
+                avg_action_variance[frame_idx],
+                color="tab:orange",
+                edgecolors="black",
+                linewidths=0.7,
+                s=70,
+                zorder=3,
+            )
+            axis.set_title("Average Action Variance Across Privileged Sweep")
+            axis.set_xlabel("Time (s)")
+            axis.set_ylabel("Mean variance across action dims")
+            axis.set_xlim(0.0, total_duration)
+            axis.set_ylim(y_min - y_pad, y_max + y_pad)
+            axis.grid(True, alpha=0.3)
+
+            fig.suptitle(
+                f"{history_key} average action variance over time\n"
+                f"t={time_values[frame_idx]:.3f}s / {total_duration:.3f}s",
+                fontsize=14,
+            )
+            fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.92))
+            buffer = io.BytesIO()
+            fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
+            buffer.seek(0)
+            frame = (plt.imread(buffer)[..., :3] * 255).astype(np.uint8)
+            frames.append(frame)
+            plt.close(fig)
+
+        imageio.mimsave(str(video_path), frames, fps=fps, codec="libx264")
+        print(f"[INFO] Saved privileged debug variance video to: {video_path}")

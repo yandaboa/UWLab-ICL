@@ -312,7 +312,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if privileged_debugger is not None:
                 privileged_debugger.plot_step(obs, timestep)
             # agent stepping
-            # obs["policy"]["insertive_object"]
             actions = policy(obs)
             if rollout_data is not None:
                 rollout_data["actions"].append(_to_cpu_detached(actions))
