@@ -128,29 +128,29 @@ class PrivilegedPolicyCfg(ObsGroup):
 
     """Contact Dynamics Observation Terms"""
 
-    # insertive_object_material_properties = ObsTerm(
-    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("insertive_object")}
-    # )
+    insertive_object_material_properties = ObsTerm(
+        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    )
 
-    # receptive_object_material_properties = ObsTerm(
-    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("receptive_object")}
-    # )
+    receptive_object_material_properties = ObsTerm(
+        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    )
 
-    # table_material_properties = ObsTerm(
-    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("table")}
-    # )
+    table_material_properties = ObsTerm(
+        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("table")}
+    )
 
-    # robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
+    robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    # insertive_object_mass = ObsTerm(
-    #     func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
-    # )
+    insertive_object_mass = ObsTerm(
+        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    )
 
-    # receptive_object_mass = ObsTerm(
-    #     func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
-    # )
+    receptive_object_mass = ObsTerm(
+        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    )
 
-    # table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
+    table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
 
     """Arm Dynamics Observation Terms"""
 
@@ -518,6 +518,7 @@ class Ur5eRobotiq2f85RelCartesianOSCContactDynamicsPOMDPTrainCfg(Ur5eRobotiq2f85
         super().__post_init__()
 
         self.observations.policy = BasePolicyCfg()
+        self.observations.data_collection = BasePolicyCfg()
         self.terminations.success = DoneTerm(func=task_mdp.consecutive_success_state, params={"num_consecutive_successes": 10})
         self.events.reset_from_reset_states = EventTerm(
             func=task_mdp.MultiResetManager,
