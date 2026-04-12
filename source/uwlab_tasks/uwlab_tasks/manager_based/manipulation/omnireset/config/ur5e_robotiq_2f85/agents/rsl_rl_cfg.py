@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import torch
+
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
@@ -16,6 +18,8 @@ from uwlab_rl.rsl_rl.rl_cfg import (
 
 def my_experts_observation_func(env):
     obs = env.unwrapped.obs_buf["expert_obs"]
+    if isinstance(obs, dict):
+        obs = torch.cat([obs[key] for key in obs.keys()], dim=-1)
     return obs
 
 
