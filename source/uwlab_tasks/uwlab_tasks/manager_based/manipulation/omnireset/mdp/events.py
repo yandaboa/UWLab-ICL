@@ -14,6 +14,8 @@ import torch
 import trimesh
 import trimesh.transformations as tra
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import cast
 
 import carb
 import isaaclab.sim as sim_utils
@@ -25,6 +27,7 @@ from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
 from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
 from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers
+from isaaclab.sensors import ContactSensor
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from pxr import Gf, UsdGeom, UsdLux
 
@@ -2131,8 +2134,8 @@ class conditional_arm_augmentation(ManagerTermBase):
             self._active_mask[category] = active
 
 
-class AugmentationActivationCondition:
-    """Stateful ``activation_expr`` for ``conditional_arm_augmentation``.
+class ProximityAugmentationActivationCondition:
+    """Stateful ``activation_expr`` for ``conditional_arm_augmentation`` based on proximity.
 
     Fires when the insertive asset is near its assembled pose AND the gripper is near
     the insertive asset. Both distance thresholds are sampled per-env from ``(lo, hi)``

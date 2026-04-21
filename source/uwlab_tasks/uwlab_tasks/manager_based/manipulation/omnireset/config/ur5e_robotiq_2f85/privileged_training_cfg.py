@@ -128,29 +128,29 @@ class PrivilegedPolicyCfg(ObsGroup):
 
     """Contact Dynamics Observation Terms"""
 
-    insertive_object_material_properties = ObsTerm(
-        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("insertive_object")}
-    )
+    # insertive_object_material_properties = ObsTerm(
+    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    # )
 
-    receptive_object_material_properties = ObsTerm(
-        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("receptive_object")}
-    )
+    # receptive_object_material_properties = ObsTerm(
+    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    # )
 
-    table_material_properties = ObsTerm(
-        func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("table")}
-    )
+    # table_material_properties = ObsTerm(
+    #     func=task_mdp.get_material_properties, params={"asset_cfg": SceneEntityCfg("table")}
+    # )
 
-    robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
+    # robot_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    insertive_object_mass = ObsTerm(
-        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
-    )
+    # insertive_object_mass = ObsTerm(
+    #     func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("insertive_object")}
+    # )
 
-    receptive_object_mass = ObsTerm(
-        func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
-    )
+    # receptive_object_mass = ObsTerm(
+    #     func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("receptive_object")}
+    # )
 
-    table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
+    # table_mass = ObsTerm(func=task_mdp.get_mass, params={"asset_cfg": SceneEntityCfg("table")})
 
     """Arm Dynamics Observation Terms"""
 
@@ -384,8 +384,9 @@ class StateTriggeredAugmentationTrainEventsCfg(RandomizeGainsTrainEventsCfg):
             ],
             "action_name": "arm",
             # Fires when insertive-to-assembled + gripper-to-insertive distances are
-            # both within per-env sampled thresholds. See AugmentationActivationCondition.
-            "activation_expr": task_mdp.AugmentationActivationCondition(
+            # both within per-env sampled thresholds. See ProximityAugmentationActivationCondition.
+            # For a contact-based alternative, see task_mdp.ContactAugmentationActivationCondition.
+            "activation_expr": task_mdp.ProximityAugmentationActivationCondition(
                 max_assembly_distance_range=(1.0, 1.25),
                 max_gripper_to_insertive_distance_range=(0.22, 0.28),
             ),
