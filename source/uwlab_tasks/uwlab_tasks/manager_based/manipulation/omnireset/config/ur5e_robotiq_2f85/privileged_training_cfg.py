@@ -154,29 +154,47 @@ class PrivilegedPolicyCfg(ObsGroup):
 
     """Arm Dynamics Observation Terms"""
 
-    # robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
+    robot_joint_friction = ObsTerm(func=task_mdp.get_joint_friction, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    # robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
+    robot_joint_armature = ObsTerm(func=task_mdp.get_joint_armature, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    # robot_joint_stiffness = ObsTerm(
-    #     func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
-    # )
+    robot_joint_stiffness = ObsTerm(
+        func=task_mdp.get_joint_stiffness, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
 
-    # robot_joint_dynamic_friction = ObsTerm(
-    #     func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
-    # )
+    robot_joint_dynamic_friction = ObsTerm(
+        func=task_mdp.get_joint_dynamic_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
 
-    # robot_joint_viscous_friction = ObsTerm(
-    #     func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
-    # )
+    robot_joint_viscous_friction = ObsTerm(
+        func=task_mdp.get_joint_viscous_friction, params={"asset_cfg": SceneEntityCfg("robot")}
+    )
 
-    # robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
+    robot_osc_gains = ObsTerm(func=task_mdp.get_osc_gains, params={"action_name": "arm"})
 
-    # robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
+    robot_joint_damping = ObsTerm(func=task_mdp.get_joint_damping, params={"asset_cfg": SceneEntityCfg("robot")})
 
-    # robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
+    robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
 
-    # robot_delay = ObsTerm(func=task_mdp.get_action_delay, params={"asset_cfg": SceneEntityCfg("robot"), "actuator_name": "arm"})
+    robot_delay = ObsTerm(func=task_mdp.get_action_delay, params={"asset_cfg": SceneEntityCfg("robot"), "actuator_name": "arm"})
+
+    """Augmentation-specific observation terms.
+
+    Existing obs (joint friction/armature/damping, OSC gains, action scale) already
+    reflect the *current* augmented value because they read live sim/action-term
+    state. These terms expose augmentation-only signals that aren't otherwise
+    visible: the raw action offset, the task-frame force bias, the external wrench
+    applied to a wrench asset, and the per-category active mask. Safe to include
+    even when ``conditional_arm_augmentation`` isn't in the event config:
+    ``action_offset`` / ``task_frame_force_bias`` just stay at zero, and the
+    mask/wrench terms would raise at construction if the event is absent, so they
+    are only enabled under ``*AugmentedTrainCfg`` via the subclass below.
+    """
+    robot_action_offset = ObsTerm(func=task_mdp.get_action_offset, params={"action_name": "arm"})
+
+    robot_task_frame_force_bias = ObsTerm(
+        func=task_mdp.get_task_frame_force_bias, params={"action_name": "arm"}
+    )
 
     def __post_init__(self):
         self.enable_corruption = False
@@ -201,6 +219,13 @@ class PrivilegedCriticCfg(ObservationsCfg.CriticCfg):
     robot_action_scale = ObsTerm(func=task_mdp.get_action_scale, params={"action_name": "arm"})
 
     robot_delay = ObsTerm(func=task_mdp.get_action_delay, params={"asset_cfg": SceneEntityCfg("robot"), "actuator_name": "arm"})
+
+    """Augmentation-specific observation terms (see PrivilegedPolicyCfg for notes)."""
+    robot_action_offset = ObsTerm(func=task_mdp.get_action_offset, params={"action_name": "arm"})
+
+    robot_task_frame_force_bias = ObsTerm(
+        func=task_mdp.get_task_frame_force_bias, params={"action_name": "arm"}
+    )
 
     def __post_init__(self):
         super().__post_init__()
@@ -325,16 +350,121 @@ class RandomizeGainsTrainEventsCfg(TrainEventCfg):
     #     },
     # )
 
+
+@configclass
+class StateTriggeredAugmentationTrainEventsCfg(RandomizeGainsTrainEventsCfg):
+    """State/step-triggered augmentation layered on top of gain randomization.
+
+    - ``activation_start_step_range`` is the (inclusive) step range from which a random
+      activation start step is sampled per env at reset, clamped to
+      ``[0, env.max_episode_length]``. When ``sample_augmentation_independently=True``,
+      a *different* start step is sampled per env per augmentation category
+      (``dynamics``, ``gains``, ``action``, ``force``).
+    - Every magnitude parameter is a ``(lo, hi)`` range sampled uniformly per env at
+      the moment its category transitions to active. Each of ``lo`` / ``hi`` may be a
+      scalar (broadcast) or a per-dim sequence.
+    - ``curriculum_*`` params shrink ``activation_start_step_range`` toward
+      ``curriculum_min_activation_start_step_range`` once mean success exceeds the
+      threshold.
+    """
+
+    augmentation_handler = EventTerm(
+        func=task_mdp.conditional_arm_augmentation,  # type: ignore[arg-type]
+        mode="interval",
+        interval_range_s=(0.0, 0.0),
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "joint_names": [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ],
+            "action_name": "arm",
+            # Fires when insertive-to-assembled + gripper-to-insertive distances are
+            # both within per-env sampled thresholds. See AugmentationActivationCondition.
+            "activation_expr": task_mdp.AugmentationActivationCondition(
+                max_assembly_distance_range=(1.0, 1.25),
+                max_gripper_to_insertive_distance_range=(0.22, 0.28),
+            ),
+            "activation_start_step_range": (15, 90),
+            "sample_augmentation_independently": True,
+            "curriculum_decay_percentage": 0.04,
+            "curriculum_success_threshold": 0.5,
+            "curriculum_min_activation_start_step_range": (2, 15),
+            "curriculum_update_every_n_steps": 500,
+            # Dynamics: per-joint multiplicative scales on the captured baseline.
+            "armature_scale_range": (0.8, 1.2),
+            "static_friction_scale_range": (0.8, 1.2),
+            "dynamic_friction_scale_range": (0.8, 1.2),
+            "viscous_friction_scale_range": (0.8, 1.2),
+            # Gains: per-axis Kp/damping-ratio scales on the captured baseline.
+            "kp_scale_range": (
+                (0.7, 0.7, 0.7, 0.8, 0.8, 0.8),
+                (1.3, 1.3, 1.3, 1.2, 1.2, 1.2),
+            ),
+            "damping_ratio_scale_range": (0.9, 1.1),
+            # Action: per-axis action scale + raw action offset (6-DOF delta pose).
+            "action_scale_range": (0.9, 1.1),
+            "action_offset_range": (
+                (3.0, 3.0, 3.0, 2.0, 2.0, 2.0),
+                (7.0, 7.0, 7.0, 3.0, 3.0, 3.0),
+            ),
+            # Force: per-axis task-frame force bias (added to OSC task-force output).
+            "task_frame_force_bias_range": (
+                (3.0, 3.0, 3.0, 2.0, 2.0, 2.0),
+                (10.0, 10.0, 10.0, 5.0, 5.0, 5.0),
+            ),
+        },
+    )
+
+
+@configclass
+class StateTriggeredAugmentationEvalEventsCfg(StateTriggeredAugmentationTrainEventsCfg):
+    """Play events for state/step-triggered augmentation layered on top of gain randomization."""
+
+    def __post_init__(self):
+        if self.augmentation_handler is not None:
+            self.augmentation_handler.params["eval_mode"] = True
+
+    reset_from_reset_states = EventTerm(
+        func=task_mdp.MultiResetManager,
+        mode="reset",
+        params={
+            "dataset_dir": f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/OmniReset",
+            "reset_types": ["ObjectAnywhereEEAnywhere"],
+            "probs": [1.0],
+            "success": "env.reward_manager.get_term_cfg('progress_context').func.success",
+        },
+    )
+
 @configclass
 class RandomizeContactDynamicsTrainEventsCfg(TrainEventCfg):
     """Randomize contact dynamics for the UR5e + Robotiq 2F-85 robot and the objects."""
+
+    robot_material = EventTerm(
+        func=task_mdp.randomize_rigid_body_material,  # type: ignore
+        mode="startup",
+        params={
+            "static_friction_range": (0.3, 1.0),
+            "dynamic_friction_range": (0.2, 1.0),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 256,
+            "asset_cfg": SceneEntityCfg("robot"),
+            "make_consistent": True,
+        },
+    )
 
     insertive_object_material = EventTerm(
         func=task_mdp.randomize_rigid_body_material,  # type: ignore
         mode="reset",
         params={
-            "static_friction_range": (0.1, 5.0),
-            "dynamic_friction_range": (0.1, 5.0),
+            "static_friction_range": (0.1, 3.0),
+            "dynamic_friction_range": (0.1, 3.0),
+            # "static_friction_range": (9.0, 10.0),
+            # "dynamic_friction_range": (9.0, 10.0),
             # "static_friction_range": (0.0, 0.1),
             # "dynamic_friction_range": (0.0, 0.1),
             # "restitution_range": (0.0, 0.1),
@@ -441,6 +571,37 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesi
         # self.observations.privileged_info = PrivilegedInfoObservationCfg()
 
 @configclass
+class Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedTrainCfg(Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg):
+    """Privileged training configuration with state/time-triggered augmentation."""
+
+    events: StateTriggeredAugmentationTrainEventsCfg = StateTriggeredAugmentationTrainEventsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        # These obs terms read directly from the ``augmentation_handler`` event's
+        # per-category active mask / sampled wrench buffers, so they are wired in
+        # only for configs that actually include that event term.
+        event_name = "augmentation_handler"
+        self.observations.policy.augmentation_active_mask = ObsTerm(
+            func=task_mdp.get_augmentation_active_mask, params={"event_name": event_name}
+        )
+        self.observations.policy.augmentation_external_wrench = ObsTerm(
+            func=task_mdp.get_augmentation_external_wrench, params={"event_name": event_name}
+        )
+        self.observations.critic.augmentation_active_mask = ObsTerm(
+            func=task_mdp.get_augmentation_active_mask, params={"event_name": event_name}
+        )
+        self.observations.critic.augmentation_external_wrench = ObsTerm(
+            func=task_mdp.get_augmentation_external_wrench, params={"event_name": event_name}
+        )
+
+
+@configclass
+class Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedPlayCfg(Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedTrainCfg):
+    """Privileged play configuration with state/time-triggered augmentation."""
+
+    events: StateTriggeredAugmentationEvalEventsCfg = StateTriggeredAugmentationEvalEventsCfg()
+@configclass
 class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainWithContactDynamicsCfg(Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg):
     """Privileged observation training configuration for the UR5e + Robotiq 2F-85 robot with contact dynamics."""
 
@@ -449,7 +610,7 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainWithContactDynamicsCfg(Ur5eRo
     def __post_init__(self):
         super().__post_init__()
 
-        self.observations.privileged_info = PrivilegedInfoObservationCfg()
+        # self.observations.privileged_info = PrivilegedInfoObservationCfg()
 
 @configclass
 class Ur5eRobotiq2f85RelCartesianOSCPrivilegedEvalWithContactDynamicsCfg(Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg):

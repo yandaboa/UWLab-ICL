@@ -29,3 +29,11 @@ class TaskCommandCfg(TaskDependentCommandCfg):
     insertive_asset_cfg: SceneEntityCfg = MISSING
 
     receptive_asset_cfg: SceneEntityCfg = MISSING
+
+    # Name of the ``conditional_arm_augmentation`` event term to pull per-category
+    # activation masks from for logging. Set to None / missing term to skip.
+    augmentation_event_name: str | None = "augmentation_handler"
+
+    # Name of the ``RelCartesianOSCAction`` action term used to log the pre-noise
+    # task-frame force. Set to None / missing term to skip.
+    arm_action_name: str | None = "arm"

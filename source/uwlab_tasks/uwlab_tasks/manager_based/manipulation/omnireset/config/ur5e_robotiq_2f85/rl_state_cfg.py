@@ -229,6 +229,7 @@ class BaseEventCfg:
 
     # mode: reset
     reset_everything = EventTerm(func=task_mdp.reset_scene_to_default, mode="reset", params={})
+    augmentation_handler: EventTerm | None = None
 
 
 @configclass
@@ -412,7 +413,7 @@ class ObservationsCfg:
 
         def __post_init__(self):
             self.enable_corruption = True
-            self.concatenate_terms = True
+            self.concatenate_terms = False
             self.history_length = 5
 
     @configclass

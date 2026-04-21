@@ -227,6 +227,66 @@ def get_action_scale(
         raise ValueError(f"Action term '{action_name}' is not a RelCartesianOSCAction.")
     return action_term._scale
 
+def get_action_offset(
+    env: ManagerBasedRLEnv,
+    action_name: str,
+) -> torch.Tensor:
+    """OSC additive action offset (``_raw_action_offset``). Zero when augmentation is
+    inactive. Shape: ``[num_envs, 6]``."""
+    action_term = env.action_manager._terms.get(action_name)
+    if action_term is None or not isinstance(action_term, RelCartesianOSCAction):
+        raise ValueError(f"Action term '{action_name}' is not a RelCartesianOSCAction.")
+    return action_term._raw_action_offset
+
+def get_task_frame_force_bias(
+    env: ManagerBasedRLEnv,
+    action_name: str,
+) -> torch.Tensor:
+    """OSC additive task-frame force bias (``_task_frame_force_bias``). Zero when
+    augmentation is inactive. Shape: ``[num_envs, 6]`` (force xyz + torque xyz)."""
+    action_term = env.action_manager._terms.get(action_name)
+    if action_term is None or not isinstance(action_term, RelCartesianOSCAction):
+        raise ValueError(f"Action term '{action_name}' is not a RelCartesianOSCAction.")
+    return action_term._task_frame_force_bias
+
+def get_augmentation_active_mask(
+    env: ManagerBasedRLEnv,
+    event_name: str = "augmentation_handler",
+) -> torch.Tensor:
+    """Per-env per-category active mask as floats. Columns follow
+    ``conditional_arm_augmentation._CATEGORIES`` (dynamics, gains, action, force).
+    Shape: ``[num_envs, num_categories]``."""
+    term_cfg = env.event_manager.get_term_cfg(event_name)
+    handler = term_cfg.func
+    active_mask = getattr(handler, "_active_mask", None)
+    categories = getattr(handler, "_CATEGORIES", None)
+    assert isinstance(active_mask, dict) and categories is not None, (
+        f"Event term '{event_name}' is not a conditional_arm_augmentation instance."
+    )
+    cols = [active_mask[cat].to(dtype=torch.float32).view(-1, 1) for cat in categories]
+    out = torch.cat(cols, dim=-1)
+    assert out.shape == (env.num_envs, len(categories))
+    return out
+
+def get_augmentation_external_wrench(
+    env: ManagerBasedRLEnv,
+    event_name: str = "augmentation_handler",
+) -> torch.Tensor:
+    """Per-env external wrench (force + torque) gated by the ``force`` category's active
+    mask. Zero when the category is inactive or no ``wrench_asset_cfg`` was configured.
+    Shape: ``[num_envs, 6]``."""
+    term_cfg = env.event_manager.get_term_cfg(event_name)
+    handler = term_cfg.func
+    force = getattr(handler, "_sampled_wrench_force", None)
+    torque = getattr(handler, "_sampled_wrench_torque", None)
+    active_mask = getattr(handler, "_active_mask", None)
+    assert (
+        isinstance(active_mask, dict) and force is not None and torque is not None and "force" in active_mask
+    ), f"Event term '{event_name}' is not a conditional_arm_augmentation instance."
+    gate = active_mask["force"].to(dtype=torch.float32).view(-1, 1)
+    assert force.shape == (env.num_envs, 3) and torque.shape == (env.num_envs, 3)
+    return torch.cat([force * gate, torque * gate], dim=-1)
+
 def get_action_delay(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg,

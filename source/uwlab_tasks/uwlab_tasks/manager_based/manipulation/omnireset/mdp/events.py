@@ -13,7 +13,7 @@ import scipy.stats as stats
 import torch
 import trimesh
 import trimesh.transformations as tra
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import carb
 import isaaclab.sim as sim_utils
@@ -21,7 +21,7 @@ import isaaclab.utils.math as math_utils
 import omni.usd
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.controllers import DifferentialIKControllerCfg
-from isaaclab.envs import ManagerBasedEnv
+from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
 from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
 from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers
@@ -1481,6 +1481,752 @@ def randomize_camera_focal_length(
         focal_attr = camera_prim.GetAttribute("focalLength")
         if focal_attr.IsValid():
             focal_attr.Set(focal_length)
+
+
+class conditional_arm_augmentation(ManagerTermBase):
+    """Conditionally augment arm dynamics, controller gains, actions, and wrench
+    (``mode="interval"``).
+
+    Categories:
+    - ``dynamics``: joint armature + static/dynamic/viscous friction scales.
+    - ``gains``: controller Kp + damping-ratio scales.
+    - ``action``: action scale + raw action offset.
+    - ``force``: task-frame force bias + external wrench on the wrench asset.
+
+    Per-env, per-reset, each category samples an activation start step from
+    ``activation_start_step_range`` (clamped to ``[0, max_episode_length]``). With
+    ``sample_augmentation_independently=True`` each category samples its own start
+    step, otherwise all categories share one.
+
+    Magnitudes are ``(lo, hi)`` ranges (scalar or per-dim), sampled per env on each
+    activation transition. ``action_offset_range`` and ``task_frame_force_bias_range``
+    are signed-magnitude ranges: ``lo, hi >= 0`` and the sign is flipped per env per dim
+    with probability 0.5. When ``activation_expr`` holds and the start-step gate fires,
+    the baseline is snapshotted and the augmentation applied; on deactivation or reset
+    the baseline is restored.
+
+    Optional curriculum: when ``curriculum_decay_percentage`` is set, the live
+    ``activation_start_step_range`` shrinks toward ``curriculum_min_activation_start_step_range``
+    by ``curriculum_decay_percentage`` of the configured span every
+    ``curriculum_update_every_n_steps`` env steps whenever the latest emitted success rate
+    exceeds ``curriculum_success_threshold``. The success rate is read directly from
+    ``env.extras['log'][curriculum_success_log_key]`` (defaults to
+    ``'Metrics/task_command/end_of_episode_success_rate'``) whenever it is present, and the
+    most recent value is cached across steps without resets so the curriculum always matches
+    the logged metric exactly. When ``eval_mode=True``, curriculum is bypassed and the live
+    effective range is pinned to the floor of ``activation_start_step_range``.
+    """
+
+    _CATEGORIES: tuple[str, ...] = ("dynamics", "gains", "action", "force")
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self.asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
+        self.robot: Articulation = env.scene[self.asset_cfg.name]
+        self.joint_ids = self.robot.find_joints(cfg.params["joint_names"])[0]
+        self._action_name: str = cfg.params["action_name"]
+        self._action_term = None
+
+        self._wrench_asset_cfg: SceneEntityCfg | None = cfg.params.get("wrench_asset_cfg")
+        self._wrench_asset: Articulation | RigidObject | None = None
+        if self._wrench_asset_cfg is not None:
+            self._wrench_asset = env.scene[self._wrench_asset_cfg.name]
+
+        num_envs = env.scene.num_envs
+        num_joints = len(self.joint_ids)
+        device = env.device
+
+        self._active_mask: dict[str, torch.Tensor] = {
+            cat: torch.zeros(num_envs, device=device, dtype=torch.bool) for cat in self._CATEGORIES
+        }
+        self._activation_start_step: dict[str, torch.Tensor] = {
+            cat: torch.zeros(num_envs, device=device, dtype=torch.long) for cat in self._CATEGORIES
+        }
+
+        self._baseline_joint_armature = torch.zeros(num_envs, num_joints, device=device)
+        self._baseline_joint_friction = torch.zeros(num_envs, num_joints, device=device)
+        self._baseline_joint_dynamic_friction = torch.zeros(num_envs, num_joints, device=device)
+        self._baseline_joint_viscous_friction = torch.zeros(num_envs, num_joints, device=device)
+        self._baseline_kp = torch.zeros(num_envs, 6, device=device)
+        self._baseline_kd = torch.zeros(num_envs, 6, device=device)
+        self._baseline_action_scale = torch.zeros(num_envs, 6, device=device)
+
+        self._sampled_armature_scale = torch.ones(num_envs, num_joints, device=device)
+        self._sampled_static_friction_scale = torch.ones(num_envs, num_joints, device=device)
+        self._sampled_dynamic_friction_scale = torch.ones(num_envs, num_joints, device=device)
+        self._sampled_viscous_friction_scale = torch.ones(num_envs, num_joints, device=device)
+        self._sampled_kp_scale = torch.ones(num_envs, 6, device=device)
+        self._sampled_damping_ratio_scale = torch.ones(num_envs, 6, device=device)
+        self._sampled_action_scale = torch.ones(num_envs, 6, device=device)
+        self._sampled_action_offset = torch.zeros(num_envs, 6, device=device)
+        self._sampled_task_frame_force_bias = torch.zeros(num_envs, 6, device=device)
+        self._sampled_wrench_force = torch.zeros(num_envs, 3, device=device)
+        self._sampled_wrench_torque = torch.zeros(num_envs, 3, device=device)
+
+        self._activation_start_step_range: tuple[int, int] | None = cfg.params.get(
+            "activation_start_step_range"
+        )
+        self._sample_augmentation_independently: bool = bool(
+            cfg.params.get("sample_augmentation_independently", False)
+        )
+        self._eval_mode: bool = bool(cfg.params.get("eval_mode", False))
+
+        if self._activation_start_step_range is not None:
+            if self._eval_mode:
+                floor_step = min(
+                    float(self._activation_start_step_range[0]),
+                    float(self._activation_start_step_range[1]),
+                )
+                self._current_activation_start_step_range = (floor_step, floor_step)
+            else:
+                self._current_activation_start_step_range: tuple[float, float] | None = (
+                    float(self._activation_start_step_range[0]),
+                    float(self._activation_start_step_range[1]),
+                )
+        else:
+            self._current_activation_start_step_range = None
+        self._curriculum_last_update_step: int | None = None
+        self._curriculum_last_logged_success_rate: float | None = None
+
+    def _resolve_action_term(self):
+        if self._action_term is not None:
+            return
+        from .actions.task_space_actions import RelCartesianOSCAction
+
+        action_term = self._env.action_manager._terms.get(self._action_name)
+        if action_term is None or not isinstance(action_term, RelCartesianOSCAction):
+            raise ValueError(f"Action term '{self._action_name}' is not a RelCartesianOSCAction.")
+        self._action_term = action_term
+
+    def _normalize_env_ids(self, env_ids: Sequence[int] | torch.Tensor | None) -> torch.Tensor:
+        if env_ids is None:
+            out = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        elif isinstance(env_ids, torch.Tensor):
+            out = env_ids.to(device=self.device, dtype=torch.long).reshape(-1)
+        else:
+            out = torch.as_tensor(env_ids, device=self.device, dtype=torch.long).reshape(-1)
+        assert out.ndim == 1, f"env_ids must reduce to 1D tensor; got shape {tuple(out.shape)}."
+        return out
+
+    def _vector_param(
+        self,
+        value: float | Sequence[float] | torch.Tensor | None,
+        dim: int,
+        default: float,
+    ) -> torch.Tensor:
+        if value is None:
+            return torch.full((dim,), default, device=self.device, dtype=torch.float32)
+        tensor = torch.as_tensor(value, device=self.device, dtype=torch.float32).flatten()
+        if tensor.numel() == 1:
+            return tensor.repeat(dim)
+        if tensor.numel() != dim:
+            raise ValueError(f"Expected parameter of length 1 or {dim}, received {tensor.numel()}.")
+        return tensor
+
+    def _sample_vector_range(
+        self,
+        value_range: tuple | list | None,
+        dim: int,
+        default: float,
+        n_envs: int,
+    ) -> torch.Tensor:
+        """Sample a ``[n_envs, dim]`` tensor uniformly from ``(lo, hi)``.
+
+        ``lo`` / ``hi`` can each be a scalar (broadcast) or a length-``dim`` sequence.
+        If the range is ``None``, the result is filled with ``default``.
+        """
+        if value_range is None:
+            return torch.full((n_envs, dim), default, device=self.device, dtype=torch.float32)
+        if len(value_range) != 2:
+            raise ValueError(f"Expected range of the form (lo, hi); got {value_range!r}.")
+        lo_raw, hi_raw = value_range
+        lo = self._vector_param(lo_raw, dim, default=default).unsqueeze(0)
+        hi = self._vector_param(hi_raw, dim, default=default).unsqueeze(0)
+        u = torch.rand(n_envs, dim, device=self.device, dtype=torch.float32)
+        return lo + (hi - lo) * u
+
+    def _sample_signed_magnitude_range(
+        self,
+        value_range: tuple | list | None,
+        dim: int,
+        n_envs: int,
+    ) -> torch.Tensor:
+        """Sample a ``[n_envs, dim]`` tensor of signed biases. ``value_range = (lo, hi)``
+        gives non-negative magnitudes (scalar or length-``dim``); magnitude is drawn uniformly
+        in ``[lo, hi]`` and the sign is flipped with probability 0.5 per env, per dim."""
+        if value_range is None:
+            return torch.zeros((n_envs, dim), device=self.device, dtype=torch.float32)
+        if len(value_range) != 2:
+            raise ValueError(f"Expected range of the form (lo, hi); got {value_range!r}.")
+        lo_raw, hi_raw = value_range
+        lo = self._vector_param(lo_raw, dim, default=0.0)
+        hi = self._vector_param(hi_raw, dim, default=0.0)
+        assert bool((lo >= 0).all().item()) and bool((hi >= 0).all().item()), (
+            f"Signed magnitude range expects non-negative (lo, hi); got lo={lo.tolist()}, hi={hi.tolist()}."
+        )
+        lo = lo.unsqueeze(0)
+        hi = hi.unsqueeze(0)
+        u = torch.rand(n_envs, dim, device=self.device, dtype=torch.float32)
+        magnitude = lo + (hi - lo) * u
+        # Bernoulli(0.5) -> {0, 1}, then 1 - 2*b -> {+1, -1}: per-dim independent sign flip.
+        signs = 1.0 - 2.0 * torch.randint(
+            0, 2, size=(n_envs, dim), device=self.device, dtype=torch.float32
+        )
+        return magnitude * signs
+
+    def _sample_activation_start_steps(self, env_ids: torch.Tensor) -> None:
+        """Sample per-env start step(s) from the live (curriculum-aware) range, inclusive and
+        clamped to ``[0, max_episode_length]``. With ``sample_augmentation_independently``,
+        each category gets an independent sample."""
+        if len(env_ids) == 0:
+            return
+        if self._current_activation_start_step_range is None:
+            for cat in self._CATEGORIES:
+                self._activation_start_step[cat][env_ids] = 0
+            return
+        max_steps = int(getattr(self._env, "max_episode_length", 0))
+        lo_raw, hi_raw = self._current_activation_start_step_range
+        lo = max(0, min(int(round(lo_raw)), max_steps))
+        hi = max(0, min(int(round(hi_raw)), max_steps))
+        if hi < lo:
+            lo, hi = hi, lo
+        if self._sample_augmentation_independently:
+            for cat in self._CATEGORIES:
+                sampled = torch.randint(
+                    low=lo, high=hi + 1, size=(len(env_ids),), device=self.device, dtype=torch.long
+                )
+                self._activation_start_step[cat][env_ids] = sampled
+        else:
+            sampled = torch.randint(
+                low=lo, high=hi + 1, size=(len(env_ids),), device=self.device, dtype=torch.long
+            )
+            for cat in self._CATEGORIES:
+                self._activation_start_step[cat][env_ids] = sampled
+
+    def _update_curriculum(
+        self,
+        env: ManagerBasedEnv,
+        *,
+        curriculum_decay_percentage: float | None,
+        curriculum_success_threshold: float,
+        curriculum_min_activation_start_step_range: tuple[int, int] | None,
+        curriculum_update_every_n_steps: int,
+        curriculum_success_log_key: str,
+    ) -> None:
+        """Shrinks the live activation-start-step range toward the per-element floor
+        ``curriculum_min_activation_start_step_range = (min_lo, min_hi)`` by
+        ``curriculum_decay_percentage`` of the configured span whenever the latest emitted
+        success rate exceeds ``curriculum_success_threshold``.
+        ``curriculum_update_every_n_steps`` is a proper post-decay cooldown: once a decay
+        fires, the next decay is blocked until that many ``common_step_counter`` steps have
+        elapsed; success is re-evaluated every step, so a decay fires immediately when the
+        threshold is (re)crossed after the cooldown. Success rate is cached from
+        ``env.extras['log'][curriculum_success_log_key]`` whenever present."""
+        if (
+            curriculum_decay_percentage is None
+            or self._activation_start_step_range is None
+            or self._current_activation_start_step_range is None
+        ):
+            return
+
+        log_dict = env.extras.get("log") if isinstance(env.extras, dict) else None
+        if isinstance(log_dict, dict) and curriculum_success_log_key in log_dict:
+            self._curriculum_last_logged_success_rate = float(log_dict[curriculum_success_log_key])
+
+        init_lo, init_hi = float(self._activation_start_step_range[0]), float(
+            self._activation_start_step_range[1]
+        )
+        if curriculum_min_activation_start_step_range is None:
+            min_lo, min_hi = 0.0, 0.0
+        else:
+            min_lo = float(curriculum_min_activation_start_step_range[0])
+            min_hi = float(curriculum_min_activation_start_step_range[1])
+
+        cur_lo, cur_hi = self._current_activation_start_step_range
+        mean_success = self._curriculum_last_logged_success_rate
+
+        current_step = int(getattr(env, "common_step_counter", 0))
+        cooldown_elapsed = self._curriculum_last_update_step is None or (
+            (current_step - self._curriculum_last_update_step) >= int(curriculum_update_every_n_steps)
+        )
+
+        if (
+            mean_success is not None
+            and mean_success > curriculum_success_threshold
+            and cooldown_elapsed
+        ):
+            step_lo = (init_lo - min_lo) * float(curriculum_decay_percentage)
+            step_hi = (init_hi - min_hi) * float(curriculum_decay_percentage)
+            cur_lo = max(min_lo, cur_lo - step_lo)
+            cur_hi = max(min_hi, cur_hi - step_hi)
+            self._current_activation_start_step_range = (cur_lo, cur_hi)
+            self._curriculum_last_update_step = current_step
+
+        if "log" not in env.extras:
+            env.extras["log"] = {}
+        env.extras["log"]["Curriculum/augmentation_activation_start_lo"] = cur_lo
+        env.extras["log"]["Curriculum/augmentation_activation_start_hi"] = cur_hi
+        if mean_success is not None:
+            env.extras["log"]["Curriculum/augmentation_mean_success_rate"] = mean_success
+
+    def _evaluate_activation_expr(
+        self,
+        env: ManagerBasedEnv,
+        activation_expr,
+    ) -> torch.Tensor:
+        """Return a per-env ``[num_envs]`` bool mask from ``activation_expr``.
+
+        Accepts:
+        - ``None``: always-on.
+        - object with ``.evaluate(env)``: preferred for stateful conditions (survives
+          ``env_cfg.to_dict()`` round-trip; plain callables get stringified and lose state).
+        - ``Callable``: called as ``fn(env)``, retried as ``fn(env, event=self)`` on TypeError.
+        - ``str``: Python expression with ``env``, ``torch``, ``math_utils``, ``robot``,
+          ``action_term``, ``event`` in scope (``__builtins__`` blanked).
+        """
+        if activation_expr is None:
+            return torch.ones(self.num_envs, device=self.device, dtype=torch.bool)
+
+        evaluate_fn = getattr(activation_expr, "evaluate", None)
+        if callable(evaluate_fn) and not isinstance(activation_expr, type):
+            expr_value = evaluate_fn(env)
+        elif callable(activation_expr):
+            try:
+                expr_value = activation_expr(env)
+            except TypeError:
+                expr_value = activation_expr(env, event=self)
+        else:
+            assert isinstance(activation_expr, str), (
+                f"activation_expr must be None, str, an object with .evaluate(env), or "
+                f"Callable; got {type(activation_expr).__name__}."
+            )
+            local_context = {
+                "env": env,
+                "torch": torch,
+                "math_utils": math_utils,
+                "robot": self.robot,
+                "action_term": self._action_term,
+                "event": self,
+            }
+            expr_value = eval(activation_expr, {"__builtins__": {}}, local_context)
+
+        if not isinstance(expr_value, torch.Tensor):
+            expr_value = torch.as_tensor(expr_value, device=self.device)
+        expr_value = expr_value.to(device=self.device)
+        if expr_value.ndim == 0:
+            return torch.full((self.num_envs,), bool(expr_value.item()), device=self.device, dtype=torch.bool)
+        return expr_value.reshape(self.num_envs, -1).all(dim=-1).to(torch.bool)
+
+    # ------------------------------------------------------------------
+    # Per-category capture / sample / apply / restore
+    # ------------------------------------------------------------------
+
+    def _capture_baseline(self, env_ids: torch.Tensor, category: str) -> None:
+        if len(env_ids) == 0:
+            return
+        if category == "dynamics":
+            self._baseline_joint_armature[env_ids] = self.robot.data.joint_armature[env_ids][:, self.joint_ids]
+            self._baseline_joint_friction[env_ids] = self.robot.data.joint_friction_coeff[env_ids][:, self.joint_ids]
+            self._baseline_joint_dynamic_friction[env_ids] = self.robot.data.joint_dynamic_friction_coeff[env_ids][
+                :, self.joint_ids
+            ]
+            self._baseline_joint_viscous_friction[env_ids] = self.robot.data.joint_viscous_friction_coeff[env_ids][
+                :, self.joint_ids
+            ]
+        elif category == "gains":
+            self._baseline_kp[env_ids] = self._action_term._kp[env_ids]
+            self._baseline_kd[env_ids] = self._action_term._kd[env_ids]
+        elif category == "action":
+            self._baseline_action_scale[env_ids] = self._action_term._scale[env_ids]
+        # "force" has no baseline to capture (the bias/wrench is purely additive).
+
+    def _sample_magnitudes(
+        self,
+        env_ids: torch.Tensor,
+        category: str,
+        *,
+        armature_scale_range,
+        static_friction_scale_range,
+        dynamic_friction_scale_range,
+        viscous_friction_scale_range,
+        kp_scale_range,
+        damping_ratio_scale_range,
+        action_scale_range,
+        action_offset_range,
+        task_frame_force_bias_range,
+        wrench_force_range,
+        wrench_torque_range,
+    ) -> None:
+        n = len(env_ids)
+        if n == 0:
+            return
+        if category == "dynamics":
+            num_joints = len(self.joint_ids)
+            self._sampled_armature_scale[env_ids] = self._sample_vector_range(
+                armature_scale_range, num_joints, default=1.0, n_envs=n
+            )
+            self._sampled_static_friction_scale[env_ids] = self._sample_vector_range(
+                static_friction_scale_range, num_joints, default=1.0, n_envs=n
+            )
+            self._sampled_dynamic_friction_scale[env_ids] = self._sample_vector_range(
+                dynamic_friction_scale_range, num_joints, default=1.0, n_envs=n
+            )
+            self._sampled_viscous_friction_scale[env_ids] = self._sample_vector_range(
+                viscous_friction_scale_range, num_joints, default=1.0, n_envs=n
+            )
+        elif category == "gains":
+            self._sampled_kp_scale[env_ids] = self._sample_vector_range(
+                kp_scale_range, 6, default=1.0, n_envs=n
+            )
+            self._sampled_damping_ratio_scale[env_ids] = self._sample_vector_range(
+                damping_ratio_scale_range, 6, default=1.0, n_envs=n
+            )
+        elif category == "action":
+            self._sampled_action_scale[env_ids] = self._sample_vector_range(
+                action_scale_range, 6, default=1.0, n_envs=n
+            )
+            self._sampled_action_offset[env_ids] = self._sample_signed_magnitude_range(
+                action_offset_range, 6, n_envs=n
+            )
+        elif category == "force":
+            self._sampled_task_frame_force_bias[env_ids] = self._sample_signed_magnitude_range(
+                task_frame_force_bias_range, 6, n_envs=n
+            )
+            self._sampled_wrench_force[env_ids] = self._sample_vector_range(
+                wrench_force_range, 3, default=0.0, n_envs=n
+            )
+            self._sampled_wrench_torque[env_ids] = self._sample_vector_range(
+                wrench_torque_range, 3, default=0.0, n_envs=n
+            )
+
+    def _apply_category(self, env_ids: torch.Tensor, category: str) -> None:
+        if len(env_ids) == 0:
+            return
+        if category == "dynamics":
+            armature = self._baseline_joint_armature[env_ids] * self._sampled_armature_scale[env_ids]
+            static_friction = self._baseline_joint_friction[env_ids] * self._sampled_static_friction_scale[env_ids]
+            dynamic_friction = (
+                self._baseline_joint_dynamic_friction[env_ids] * self._sampled_dynamic_friction_scale[env_ids]
+            )
+            # Physical constraint: static friction effort >= dynamic friction effort.
+            # Static and dynamic scales are sampled independently, so clamp here.
+            dynamic_friction = torch.minimum(dynamic_friction, static_friction)
+            viscous_friction = (
+                self._baseline_joint_viscous_friction[env_ids] * self._sampled_viscous_friction_scale[env_ids]
+            )
+            self.robot.write_joint_armature_to_sim(armature, joint_ids=self.joint_ids, env_ids=env_ids)
+            self.robot.write_joint_friction_coefficient_to_sim(
+                static_friction,
+                joint_dynamic_friction_coeff=dynamic_friction,
+                joint_viscous_friction_coeff=viscous_friction,
+                joint_ids=self.joint_ids,
+                env_ids=env_ids,
+            )
+        elif category == "gains":
+            new_kp = self._baseline_kp[env_ids] * self._sampled_kp_scale[env_ids]
+            base_damping_ratio = self._baseline_kd[env_ids] / (
+                2.0 * torch.sqrt(self._baseline_kp[env_ids].clamp_min(1e-6))
+            )
+            new_damping_ratio = base_damping_ratio * self._sampled_damping_ratio_scale[env_ids]
+            new_kd = 2.0 * torch.sqrt(new_kp.clamp_min(1e-6)) * new_damping_ratio
+            self._action_term._kp[env_ids] = new_kp
+            self._action_term._kd[env_ids] = new_kd
+        elif category == "action":
+            self._action_term._scale[env_ids] = (
+                self._baseline_action_scale[env_ids] * self._sampled_action_scale[env_ids]
+            )
+            self._action_term.set_augmentation(
+                env_ids,
+                raw_action_offset=self._sampled_action_offset[env_ids].clone(),
+            )
+        elif category == "force":
+            self._action_term.set_augmentation(
+                env_ids,
+                task_frame_force_bias=self._sampled_task_frame_force_bias[env_ids].clone(),
+            )
+            self._set_external_wrench_per_env(
+                env_ids,
+                self._sampled_wrench_force[env_ids],
+                self._sampled_wrench_torque[env_ids],
+            )
+
+    def _restore_category(self, env_ids: torch.Tensor, category: str) -> None:
+        if len(env_ids) == 0:
+            return
+        if category == "dynamics":
+            self.robot.write_joint_armature_to_sim(
+                self._baseline_joint_armature[env_ids], joint_ids=self.joint_ids, env_ids=env_ids
+            )
+            self.robot.write_joint_friction_coefficient_to_sim(
+                self._baseline_joint_friction[env_ids],
+                joint_dynamic_friction_coeff=self._baseline_joint_dynamic_friction[env_ids],
+                joint_viscous_friction_coeff=self._baseline_joint_viscous_friction[env_ids],
+                joint_ids=self.joint_ids,
+                env_ids=env_ids,
+            )
+        elif category == "gains":
+            self._action_term._kp[env_ids] = self._baseline_kp[env_ids]
+            self._action_term._kd[env_ids] = self._baseline_kd[env_ids]
+        elif category == "action":
+            self._action_term._scale[env_ids] = self._baseline_action_scale[env_ids]
+            zero = torch.zeros(len(env_ids), 6, device=self.device, dtype=torch.float32)
+            self._action_term.set_augmentation(env_ids, raw_action_offset=zero)
+        elif category == "force":
+            zero6 = torch.zeros(len(env_ids), 6, device=self.device, dtype=torch.float32)
+            self._action_term.set_augmentation(env_ids, task_frame_force_bias=zero6)
+            zero3 = torch.zeros(len(env_ids), 3, device=self.device, dtype=torch.float32)
+            self._set_external_wrench_per_env(env_ids, zero3, zero3)
+
+    def _set_external_wrench_per_env(
+        self,
+        env_ids: torch.Tensor,
+        force_per_env: torch.Tensor,
+        torque_per_env: torch.Tensor,
+    ) -> None:
+        """Broadcast per-env ``[n, 3]`` force/torque across all wrench-asset bodies.
+        ``body_ids`` must be ``list[int]`` or ``None`` / ``slice(None)``; other forms are
+        rejected to avoid silently broadcasting onto the wrong bodies."""
+        if self._wrench_asset_cfg is None or self._wrench_asset is None:
+            return
+
+        body_ids = self._wrench_asset_cfg.body_ids
+        if isinstance(body_ids, list):
+            assert body_ids and all(isinstance(b, int) for b in body_ids), (
+                f"wrench_asset_cfg.body_ids must be non-empty list[int]; got {body_ids!r}."
+            )
+            num_bodies = len(body_ids)
+        elif body_ids is None:
+            num_bodies = self._wrench_asset.num_bodies
+        elif isinstance(body_ids, slice):
+            assert body_ids == slice(None), f"body_ids slice must be slice(None); got {body_ids!r}."
+            num_bodies = self._wrench_asset.num_bodies
+        else:
+            raise TypeError(
+                f"wrench_asset_cfg.body_ids must be list[int], None, or slice(None); "
+                f"got {type(body_ids).__name__} ({body_ids!r})."
+            )
+
+        assert env_ids.ndim == 1, f"env_ids must be 1D; got {tuple(env_ids.shape)}."
+        n = int(env_ids.numel())
+        assert force_per_env.shape == (n, 3), f"force_per_env must be ({n}, 3); got {tuple(force_per_env.shape)}."
+        assert torque_per_env.shape == (n, 3), f"torque_per_env must be ({n}, 3); got {tuple(torque_per_env.shape)}."
+
+        force_vec = force_per_env.unsqueeze(1).expand(-1, num_bodies, -1).contiguous()
+        torque_vec = torque_per_env.unsqueeze(1).expand(-1, num_bodies, -1).contiguous()
+        assert force_vec.shape == (n, num_bodies, 3)
+        assert torque_vec.shape == (n, num_bodies, 3)
+
+        self._wrench_asset.permanent_wrench_composer.set_forces_and_torques(
+            force_vec,
+            torque_vec,
+            env_ids=env_ids,
+            body_ids=body_ids,
+        )
+
+    def reset(self, env_ids: Sequence[int] | torch.Tensor | None = None) -> None:
+        self._resolve_action_term()
+        reset_env_ids = self._normalize_env_ids(env_ids)
+        # Only restore envs that were actually active in each category; else we'd
+        # write the zero-initialized baseline on the first reset.
+        for category in self._CATEGORIES:
+            active_in_reset = self._active_mask[category][reset_env_ids]
+            if active_in_reset.any():
+                active_reset_ids = reset_env_ids[active_in_reset]
+                self._restore_category(active_reset_ids, category)
+            self._active_mask[category][reset_env_ids] = False
+        self._sample_activation_start_steps(reset_env_ids)
+
+        # Forward reset to a stateful activation_expr so per-env state can be re-sampled.
+        # Reject ``type`` to avoid unbound-method calls on classes returned by
+        # ``string_to_callable`` round-trips.
+        activation_expr = self.cfg.params.get("activation_expr")
+        reset_fn = getattr(activation_expr, "reset", None)
+        if activation_expr is not None and not isinstance(activation_expr, type) and callable(reset_fn):
+            reset_fn(reset_env_ids)
+
+    def __call__(
+        self,
+        env: ManagerBasedEnv,
+        env_ids,
+        asset_cfg: SceneEntityCfg,
+        joint_names: list[str],
+        action_name: str,
+        activation_expr: str | Callable[..., torch.Tensor] | None = None,
+        activation_start_step_range: tuple[int, int] | None = None,
+        sample_augmentation_independently: bool = False,
+        armature_scale_range: tuple | list | None = None,
+        static_friction_scale_range: tuple | list | None = None,
+        dynamic_friction_scale_range: tuple | list | None = None,
+        viscous_friction_scale_range: tuple | list | None = None,
+        kp_scale_range: tuple | list | None = None,
+        damping_ratio_scale_range: tuple | list | None = None,
+        action_scale_range: tuple | list | None = None,
+        action_offset_range: tuple | list | None = None,
+        task_frame_force_bias_range: tuple | list | None = None,
+        wrench_asset_cfg: SceneEntityCfg | None = None,
+        wrench_force_range: tuple | list | None = None,
+        wrench_torque_range: tuple | list | None = None,
+        curriculum_decay_percentage: float | None = None,
+        curriculum_success_threshold: float = 0.5,
+        curriculum_min_activation_start_step_range: tuple[int, int] | None = None,
+        curriculum_update_every_n_steps: int = 160,
+        curriculum_success_log_key: str = "Metrics/task_command/end_of_episode_success_rate",
+        eval_mode: bool = False,
+    ) -> None:
+        self._resolve_action_term()
+        self._eval_mode = bool(eval_mode)
+        if self._eval_mode and self._activation_start_step_range is not None:
+            floor_step = min(
+                float(self._activation_start_step_range[0]),
+                float(self._activation_start_step_range[1]),
+            )
+            self._current_activation_start_step_range = (floor_step, floor_step)
+        else:
+            self._update_curriculum(
+                env,
+                curriculum_decay_percentage=curriculum_decay_percentage,
+                curriculum_success_threshold=curriculum_success_threshold,
+                curriculum_min_activation_start_step_range=curriculum_min_activation_start_step_range,
+                curriculum_update_every_n_steps=curriculum_update_every_n_steps,
+                curriculum_success_log_key=curriculum_success_log_key,
+            )
+
+        expr_mask = self._evaluate_activation_expr(env, activation_expr)
+
+        sample_kwargs = dict(
+            armature_scale_range=armature_scale_range,
+            static_friction_scale_range=static_friction_scale_range,
+            dynamic_friction_scale_range=dynamic_friction_scale_range,
+            viscous_friction_scale_range=viscous_friction_scale_range,
+            kp_scale_range=kp_scale_range,
+            damping_ratio_scale_range=damping_ratio_scale_range,
+            action_scale_range=action_scale_range,
+            action_offset_range=action_offset_range,
+            task_frame_force_bias_range=task_frame_force_bias_range,
+            wrench_force_range=wrench_force_range,
+            wrench_torque_range=wrench_torque_range,
+        )
+
+        for category in self._CATEGORIES:
+            start_mask = env.episode_length_buf >= self._activation_start_step[category]
+            active = expr_mask & start_mask
+
+            prev_active = self._active_mask[category]
+            newly_active = active & ~prev_active
+            newly_inactive = ~active & prev_active
+
+            # reshape(-1) over squeeze(-1): nonzero returns [k, 1]; squeeze(-1) can
+            # collapse to 0-D in edge cases.
+            newly_active_ids = torch.nonzero(newly_active, as_tuple=False).reshape(-1)
+            newly_inactive_ids = torch.nonzero(newly_inactive, as_tuple=False).reshape(-1)
+            assert newly_active_ids.ndim == 1 and newly_inactive_ids.ndim == 1
+
+            if newly_active_ids.numel() > 0:
+                self._capture_baseline(newly_active_ids, category)
+                self._sample_magnitudes(newly_active_ids, category, **sample_kwargs)
+                self._apply_category(newly_active_ids, category)
+            if newly_inactive_ids.numel() > 0:
+                self._restore_category(newly_inactive_ids, category)
+
+            self._active_mask[category] = active
+
+
+class AugmentationActivationCondition:
+    """Stateful ``activation_expr`` for ``conditional_arm_augmentation``.
+
+    Fires when the insertive asset is near its assembled pose AND the gripper is near
+    the insertive asset. Both distance thresholds are sampled per-env from ``(lo, hi)``
+    ranges, and re-sampled on reset via the handler's reset-forwarding hook.
+
+    Intentionally not callable: Isaac Lab's config round-trip stringifies callables and
+    restores the *class*, losing per-env state. Non-callable instances are recursed into
+    instead, preserving identity; the handler dispatches to ``.evaluate(env)``.
+    """
+
+    def __init__(
+        self,
+        *,
+        ee_body_name: str = "left_inner_finger",
+        insertive_asset_name: str = "insertive_object",
+        robot_name: str = "robot",
+        progress_term_name: str = "progress_context",
+        max_assembly_distance_range: tuple[float, float] = (0.15, 0.25),
+        max_gripper_to_insertive_distance_range: tuple[float, float] = (0.10, 0.20),
+    ) -> None:
+        self._ee_body_name = ee_body_name
+        self._insertive_asset_name = insertive_asset_name
+        self._robot_name = robot_name
+        self._progress_term_name = progress_term_name
+
+        lo_a, hi_a = max_assembly_distance_range
+        lo_g, hi_g = max_gripper_to_insertive_distance_range
+        assert lo_a <= hi_a, f"max_assembly_distance_range needs lo <= hi; got {max_assembly_distance_range!r}."
+        assert lo_g <= hi_g, (
+            f"max_gripper_to_insertive_distance_range needs lo <= hi; got {max_gripper_to_insertive_distance_range!r}."
+        )
+        self._max_assembly_distance_range = (float(lo_a), float(hi_a))
+        self._max_gripper_to_insertive_distance_range = (float(lo_g), float(hi_g))
+
+        self._ee_body_idx: int | None = None
+        self._max_assembly_distance: torch.Tensor | None = None
+        self._max_gripper_to_insertive_distance: torch.Tensor | None = None
+
+    def _sample(self, env_ids: torch.Tensor) -> None:
+        n = int(env_ids.numel())
+        if n == 0 or self._max_assembly_distance is None:
+            return
+        assert self._max_gripper_to_insertive_distance is not None
+        device = self._max_assembly_distance.device
+        lo_a, hi_a = self._max_assembly_distance_range
+        lo_g, hi_g = self._max_gripper_to_insertive_distance_range
+        u_a = torch.rand(n, device=device, dtype=torch.float32)
+        u_g = torch.rand(n, device=device, dtype=torch.float32)
+        self._max_assembly_distance[env_ids] = lo_a + (hi_a - lo_a) * u_a
+        self._max_gripper_to_insertive_distance[env_ids] = lo_g + (hi_g - lo_g) * u_g
+
+    def _ensure_buffers(self, env: ManagerBasedRLEnv) -> None:
+        if self._max_assembly_distance is not None:
+            return
+        self._max_assembly_distance = torch.empty(env.num_envs, device=env.device, dtype=torch.float32)
+        self._max_gripper_to_insertive_distance = torch.empty(
+            env.num_envs, device=env.device, dtype=torch.float32
+        )
+        all_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+        self._sample(all_ids)
+
+    def reset(self, env_ids) -> None:
+        if self._max_assembly_distance is None:
+            return
+        device = self._max_assembly_distance.device
+        if env_ids is None:
+            env_ids = torch.arange(
+                self._max_assembly_distance.shape[0], device=device, dtype=torch.long
+            )
+        elif isinstance(env_ids, torch.Tensor):
+            env_ids = env_ids.to(device=device, dtype=torch.long).reshape(-1)
+        else:
+            env_ids = torch.as_tensor(env_ids, device=device, dtype=torch.long).reshape(-1)
+        assert env_ids.ndim == 1
+        self._sample(env_ids)
+
+    def evaluate(self, env: ManagerBasedRLEnv) -> torch.Tensor:
+        self._ensure_buffers(env)
+        assert (
+            self._max_assembly_distance is not None
+            and self._max_gripper_to_insertive_distance is not None
+        )
+        robot = env.scene[self._robot_name]
+        insertive = env.scene[self._insertive_asset_name]
+        progress = env.reward_manager.get_term_cfg(self._progress_term_name).func
+        if self._ee_body_idx is None:
+            self._ee_body_idx = robot.body_names.index(self._ee_body_name)
+        ee_pos = robot.data.body_link_pos_w[:, self._ee_body_idx]
+        gripper_to_insertive = torch.norm(ee_pos - insertive.data.root_pos_w, dim=-1)
+        # print(f"insertive to receptive: {progress.xyz_distance}")
+        # print(f"gripper_to_insertive: {gripper_to_insertive}")
+        return (progress.xyz_distance < self._max_assembly_distance) & (
+            gripper_to_insertive < self._max_gripper_to_insertive_distance
+        )
 
 
 class randomize_arm_from_sysid(ManagerTermBase):

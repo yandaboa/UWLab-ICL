@@ -87,6 +87,11 @@ class RelCartesianOSCAction(ActionTerm):
         self._processed_actions = torch.zeros(self.num_envs, 6, device=self.device)
         self._ee_pos_des = torch.zeros(self.num_envs, 3, device=self.device)
         self._ee_quat_des = torch.zeros(self.num_envs, 4, device=self.device)
+        self._raw_action_offset = torch.zeros(self.num_envs, 6, device=self.device)
+        self._task_frame_force_bias = torch.zeros(self.num_envs, 6, device=self.device)
+        # Last pre-bias task-frame wrench (Kp*err + Kd*vel_err), before `_task_frame_force_bias`.
+        # Overwritten every physics sub-step; read by metrics/obs for logging.
+        self._last_task_force_pre_bias = torch.zeros(self.num_envs, 6, device=self.device)
 
     # ------------------------------------------------------------------
     # Properties
@@ -108,14 +113,36 @@ class RelCartesianOSCAction(ActionTerm):
     # Operations
     # ------------------------------------------------------------------
 
+    def set_augmentation(
+        self,
+        env_ids: Sequence[int] | torch.Tensor | None = None,
+        raw_action_offset: torch.Tensor | None = None,
+        task_frame_force_bias: torch.Tensor | None = None,
+    ) -> None:
+        """Set per-environment controller augmentation buffers."""
+        if env_ids is None:
+            env_ids = slice(None)
+        if raw_action_offset is not None:
+            self._raw_action_offset[env_ids] = raw_action_offset
+        if task_frame_force_bias is not None:
+            self._task_frame_force_bias[env_ids] = task_frame_force_bias
+
+    def clear_augmentation(self, env_ids: Sequence[int] | torch.Tensor | None = None) -> None:
+        """Clear per-environment controller augmentation buffers."""
+        if env_ids is None:
+            env_ids = slice(None)
+        self._raw_action_offset[env_ids] = 0.0
+        self._task_frame_force_bias[env_ids] = 0.0
+
     def process_actions(self, actions: torch.Tensor):
         """Scale raw 6-DOF deltas and compute desired EE pose for the PD tracker.
 
         Called once per policy step. The desired pose is held fixed while
         apply_actions recomputes torques at each physics step.
         """
-        self._raw_actions[:] = actions
-        scaled = actions * self._scale
+        effective_actions = actions + self._raw_action_offset
+        self._raw_actions[:] = effective_actions
+        scaled = effective_actions * self._scale
         if self._input_clip is not None:
             scaled = torch.clamp(scaled, min=self._input_clip[0], max=self._input_clip[1])
         self._processed_actions[:] = scaled
@@ -160,7 +187,9 @@ class RelCartesianOSCAction(ActionTerm):
 
         # PD control: tau = J^T @ (Kp * err + Kd * (-vel))
         vel_error = -ee_vel
-        task_force = self._kp * pose_error + self._kd * vel_error
+        task_force_pre_bias = self._kp * pose_error + self._kd * vel_error
+        self._last_task_force_pre_bias[:] = task_force_pre_bias
+        task_force = task_force_pre_bias + self._task_frame_force_bias
         joint_torques = torch.bmm(jacobian.transpose(-1, -2), task_force.unsqueeze(-1)).squeeze(-1)
         joint_torques = torch.clamp(joint_torques, -self._torque_max, self._torque_max)
 
@@ -171,6 +200,9 @@ class RelCartesianOSCAction(ActionTerm):
         if env_ids is None:
             env_ids = slice(None)
         self._raw_actions[env_ids] = 0.0
+        self._processed_actions[env_ids] = 0.0
+        self._last_task_force_pre_bias[env_ids] = 0.0
+        self.clear_augmentation(env_ids)
         ee_pos_b, ee_quat_b = self._get_ee_pose_root_frame()
         self._ee_pos_des[env_ids] = ee_pos_b[env_ids]
         self._ee_quat_des[env_ids] = ee_quat_b[env_ids]

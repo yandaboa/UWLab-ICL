@@ -106,6 +106,22 @@ class TaskCommand(TaskDependentCommand):
         self.metrics["end_of_episode_pos_align_error"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["end_of_episode_success_rate"] = torch.zeros(self.num_envs, device=self.device)
 
+        # Lazily-resolved augmentation handler metrics. CommandManager is built before
+        # EventManager, so we can't bind to the handler here; resolve on first
+        # ``_update_metrics`` instead. CommandManager averages metric tensors across
+        # envs at reset, so a bool mask cast to float becomes the fraction of envs
+        # currently being augmented.
+        self._augmentation_event_name: str | None = getattr(cfg, "augmentation_event_name", None)
+        self._augmentation_handler = None
+        self._augmentation_categories: tuple[str, ...] = ()
+        self._augmentation_resolved: bool = False
+
+        # Lazily-resolved OSC action term; used to log pre-noise task-frame force.
+        # ActionManager is also built after CommandManager, hence the deferred resolve.
+        self._arm_action_name: str | None = getattr(cfg, "arm_action_name", None)
+        self._arm_action_term = None
+        self._arm_action_resolved: bool = False
+
         self.orientation_aligned = torch.zeros((self._env.num_envs), dtype=torch.bool, device=self._env.device)
         self.position_aligned = torch.zeros((self._env.num_envs), dtype=torch.bool, device=self._env.device)
         self.euler_xy_distance = torch.zeros((self._env.num_envs), device=self._env.device)
@@ -153,6 +169,72 @@ class TaskCommand(TaskDependentCommand):
         self.orientation_aligned[:] = self.euler_xy_distance < self.success_orientation_threshold
         self.metrics["average_rot_align_error"][:] = self.euler_xy_distance
         self.metrics["average_pos_align_error"][:] = self.xyz_distance
+
+        self._maybe_resolve_augmentation_handler()
+        if self._augmentation_handler is not None:
+            active_mask = self._augmentation_handler._active_mask
+            any_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            for cat in self._augmentation_categories:
+                cat_mask = active_mask[cat]
+                self.metrics[f"augmentation_active_frac/{cat}"][:] = cat_mask.float()
+                any_active = any_active | cat_mask
+            self.metrics["augmentation_active_frac/any"][:] = any_active.float()
+
+        self._maybe_resolve_arm_action_term()
+        if self._arm_action_term is not None:
+            # Pre-bias task-frame wrench snapshot from the last physics substep.
+            # CommandManager averages across envs on reset, giving mean magnitudes.
+            tf = self._arm_action_term._last_task_force_pre_bias
+            self.metrics["task_force_pre_bias/force_norm"][:] = torch.norm(tf[:, :3], dim=-1)
+            self.metrics["task_force_pre_bias/torque_norm"][:] = torch.norm(tf[:, 3:], dim=-1)
+            self.metrics["task_force_pre_bias/abs_mean"][:] = tf.abs().mean(dim=-1)
+
+    def _maybe_resolve_augmentation_handler(self) -> None:
+        """Resolve the augmentation event term on first call and lazily register
+        per-category activation-fraction metrics. No-ops if the term is missing or
+        isn't a ``conditional_arm_augmentation`` instance."""
+        if self._augmentation_resolved:
+            return
+        event_manager = getattr(self._env, "event_manager", None)
+        if event_manager is None or self._augmentation_event_name is None:
+            return
+        try:
+            term_cfg = event_manager.get_term_cfg(self._augmentation_event_name)
+        except ValueError:
+            self._augmentation_resolved = True
+            return
+        handler = getattr(term_cfg, "func", None)
+        categories = getattr(handler, "_CATEGORIES", None)
+        if handler is not None and categories is not None and hasattr(handler, "_active_mask"):
+            self._augmentation_handler = handler
+            self._augmentation_categories = tuple(categories)
+            for cat in self._augmentation_categories:
+                self.metrics[f"augmentation_active_frac/{cat}"] = torch.zeros(self.num_envs, device=self.device)
+            self.metrics["augmentation_active_frac/any"] = torch.zeros(self.num_envs, device=self.device)
+        self._augmentation_resolved = True
+
+    def _maybe_resolve_arm_action_term(self) -> None:
+        """Resolve the OSC action term on first call and register pre-bias task-force
+        magnitude metrics. No-ops if the term is missing or lacks the expected buffer."""
+        if self._arm_action_resolved:
+            return
+        action_manager = getattr(self._env, "action_manager", None)
+        if action_manager is None or self._arm_action_name is None:
+            return
+        try:
+            term = action_manager.get_term(self._arm_action_name)
+        except (KeyError, ValueError):
+            self._arm_action_resolved = True
+            return
+        if term is not None and hasattr(term, "_last_task_force_pre_bias"):
+            self._arm_action_term = term
+            for key in (
+                "task_force_pre_bias/force_norm",
+                "task_force_pre_bias/torque_norm",
+                "task_force_pre_bias/abs_mean",
+            ):
+                self.metrics[key] = torch.zeros(self.num_envs, device=self.device)
+        self._arm_action_resolved = True
 
     def _resample_command(self, env_ids: Sequence[int]):
         super()._resample_command(env_ids)
