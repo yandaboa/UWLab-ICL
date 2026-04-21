@@ -170,7 +170,7 @@ class ZarrDatasetFileHandler(DatasetFileHandlerBase):
             meta_group = self._dataset.create_group("meta")
 
             # Initialize episode_ends array
-            meta_group.zeros("episode_ends", shape=(0,), dtype=np.int64, compressor=None)
+            meta_group.zeros(name="episode_ends", shape=(0,), dtype=np.int64, compressor=None)
 
             # Add environment name to metadata
             self._dataset.attrs["env_name"] = self._env_name

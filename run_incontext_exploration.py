@@ -21,7 +21,7 @@ def collect_demos(
 ):
     command = [
         "python",
-        "scripts_v2/tools/collect_demos.py",
+        "scripts_v2/tools/collect_demos_asteroid.py",
         "--task",
         task,
         "--dataset_file",

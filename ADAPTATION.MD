@@ -38,13 +38,13 @@ python scripts/reinforcement_learning/rsl_rl/play.py     --task OmniReset-Ur5eRo
 python run_incontext_exploration.py \
     --data_task OmniReset-Ur5eRobotiq2f85-POMDP-ContactDynamics-v0 \
     --eval_task OmniReset-Ur5eRobotiq2f85-POMDP-ContactDynamics-Play-v0 \
-    --expert_policy_checkpoint /home/ubuntu/lti/UWLab-ICL/logs/rsl_rl/ur5e_robotiq_2f85_omnireset_agent/2026-04-08_18-31-13/model_3200.pt \
+    --expert_policy_checkpoint contact_expert.pt \
     --config_name in_context_exploration_state.yaml \
     --output_dir logs/incontext_exploration \
     --exp_name incontext_exploration \
     --wandb_project incontext_exploration \
     --num_demos 10000 \
-    --num_data_envs 4096 \
+    --num_data_envs 1024 \
     --num_eval_envs 1024 \
     --num_eval_episodes 2 \
     --max_iterations 3 \

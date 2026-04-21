@@ -76,3 +76,7 @@ tests/
 episodes/
 exported/
 reset_state_datasets*/
+rollouts/
+renders/
+checkpoints/
+*.pt
