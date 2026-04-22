@@ -41,6 +41,13 @@ numcodecs==0.13.1
 # `diffusers.optimization`).
 diffusers==0.37.1
 
+# numba 0.64 imports `coverage.types.Tracer` eagerly in numba/misc/coverage_support.py.
+# Isaac Sim ships `coverage==7.4.4` in its pip prebundle, which renamed that symbol to
+# `TracerCore`; coverage 7.13.5 restores `Tracer`. We install coverage here so the
+# conda env's copy shadows Isaac Sim's bundle (PYTHONPATH is prepended in
+# /home/ubuntu/lti/activate_conda.sh).
+coverage==7.13.5
+
 # --- install notes (do not pin here) -----------------------------------------
 # Isaac Lab is pinned by the editable install of _isaaclab/IsaacLab/source/*.
 # PyTorch is installed out-of-band via the CUDA index URL above (don't list it
