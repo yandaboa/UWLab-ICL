@@ -38,9 +38,93 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from multiprocessing.connection import Listener
 from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Subprocess log streaming
+# ---------------------------------------------------------------------------
+
+
+class SubprocessLogStreamer:
+    """Tees a subprocess's stdout/stderr to a log file and a terminal stream.
+
+    Owns the output log file and a background daemon thread that reads from the
+    subprocess pipe line-by-line, writes raw bytes to the log file, and writes
+    prefixed bytes to ``term_stream`` so console output is easy to disambiguate
+    from the orchestrator's own prints.
+    """
+
+    def __init__(self, log_path: str, term_stream=sys.stdout, prefix: str = "") -> None:
+        self.log_path = log_path
+        self._term_stream = term_stream
+        self._prefix_b = prefix.encode("utf-8")
+        self._log_f = open(log_path, "wb")
+        self._thread: threading.Thread | None = None
+        self._pipe = None
+
+    def attach(self, pipe) -> None:
+        """Start streaming from ``pipe`` (typically ``proc.stdout``)."""
+        self._pipe = pipe
+        self._thread = threading.Thread(target=self._run, args=(pipe,), daemon=True)
+        self._thread.start()
+
+    def _run(self, pipe) -> None:
+        term_bin = getattr(self._term_stream, "buffer", None)
+        leading = True
+        try:
+            while True:
+                chunk = pipe.readline()
+                if not chunk:
+                    break
+                out = (self._prefix_b + chunk) if leading else chunk
+                leading = chunk.endswith(b"\n")
+                try:
+                    self._log_f.write(chunk)
+                    self._log_f.flush()
+                except Exception:
+                    pass
+                try:
+                    if term_bin is not None:
+                        term_bin.write(out)
+                        term_bin.flush()
+                    else:
+                        self._term_stream.write(out.decode("utf-8", errors="replace"))
+                        self._term_stream.flush()
+                except Exception:
+                    pass
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    def tail(self, num_bytes: int = 4000) -> str:
+        """Return the last ``num_bytes`` of captured output as text."""
+        try:
+            self._log_f.flush()
+        except Exception:
+            pass
+        try:
+            with open(self.log_path, "rb") as f:
+                data = f.read()
+            return data[-num_bytes:].decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def close(self, join_timeout_s: float = 5.0) -> None:
+        if self._thread is not None:
+            try:
+                self._thread.join(timeout=join_timeout_s)
+            except Exception:
+                pass
+        try:
+            self._log_f.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +149,7 @@ class CollectionWorker:
         enable_exploration_ratio_filter: bool = False,
         python_executable: str | None = None,
         startup_timeout_s: float = 1200.0,
+        log_dir: str | None = None,
     ) -> None:
         self.task = task
         self.num_envs = num_envs
@@ -97,6 +182,8 @@ class CollectionWorker:
             "--seed",
             str(seed),
             "--headless",
+            "--device",
+            f"cuda:{gpu_id}",
             f"env.scene.insertive_object={insertive_object}",
             'agent.algorithm.offline_algorithm_cfg.behavior_cloning_cfg.experts_path=["' + expert_path + '"]',
         ]
@@ -108,11 +195,27 @@ class CollectionWorker:
             cmd.append("--enable_exploration_ratio_filter")
 
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        env.pop("CUDA_VISIBLE_DEVICES", None)
         env.setdefault("PYTHONUNBUFFERED", "1")
 
-        print(f"[orchestrator] launching collection worker on GPU {gpu_id}:\n  {' '.join(cmd)}")
-        self._proc = subprocess.Popen(cmd, env=env)
+        if log_dir is None:
+            base = os.path.abspath(os.path.join(os.getcwd(), "logs", "dagger_worker"))
+            log_dir = os.path.join(base, datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + f"_pid{os.getpid()}")
+        os.makedirs(log_dir, exist_ok=True)
+        worker_log_path = os.path.join(log_dir, "worker.log")
+        self.worker_log_path = worker_log_path
+        print(f"[orchestrator] launching collection worker on GPU {gpu_id} (log: {worker_log_path}):\n  {' '.join(cmd)}")
+        self._log_streamer = SubprocessLogStreamer(
+            log_path=worker_log_path, term_stream=sys.stdout, prefix="[worker] "
+        )
+        self._proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+        )
+        self._log_streamer.attach(self._proc.stdout)
 
         # Accept the worker's callback. We poll the listener socket *and* the child's
         # exit status so we can fail fast if the worker dies during startup.
@@ -129,7 +232,15 @@ class CollectionWorker:
                 self._conn = self._listener.accept()
         if self._conn is None:
             self._proc.send_signal(signal.SIGTERM)
-            raise RuntimeError(f"Timed out ({startup_timeout_s}s) waiting for the collection worker to connect.")
+            try:
+                self._proc.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+            self._log_streamer.close()
+            raise RuntimeError(
+                f"Timed out ({startup_timeout_s}s) waiting for the collection worker to connect.\n"
+                f"Worker log tail ({worker_log_path}):\n{self._log_streamer.tail()}"
+            )
 
         hello = self._conn.recv()
         assert hello.get("status") == "ready", f"Unexpected worker hello: {hello}"
@@ -190,12 +301,21 @@ class CollectionWorker:
         try:
             self._proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
+            # SIGTERM first for a clean shutdown, but Isaac Sim's `simulation_app.close()`
+            # can deadlock on CUDA; don't wait long before SIGKILLing.
             print("[orchestrator] collection worker did not exit in time; sending SIGTERM.")
             self._proc.send_signal(signal.SIGTERM)
             try:
-                self._proc.wait(timeout=10.0)
+                self._proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
+                print("[orchestrator] worker still alive after SIGTERM; sending SIGKILL.")
                 self._proc.kill()
+                try:
+                    self._proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    pass
+        if getattr(self, "_log_streamer", None) is not None:
+            self._log_streamer.close()
         try:
             os.remove(self.socket_path)
         except FileNotFoundError:

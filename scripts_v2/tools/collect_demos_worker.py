@@ -226,16 +226,18 @@ class CollectionSession:
         self.deterministic = deterministic
         self.apply_exploration_ratio_filter = apply_exploration_ratio_filter
 
-        # Load expert once and keep it in memory.
         bc = agent_cfg.algorithm.offline_algorithm_cfg.behavior_cloning_cfg
         assert len(bc.experts_path) == 1, "Only one expert is supported for now."
         self.expert_obs_fn = bc.experts_observation_func
         loader = bc.experts_loader
         if not callable(loader):
             loader = eval(loader)
+        print(f"[worker] loading expert policy from {bc.experts_path[0]}...", flush=True)
+        _t0 = time.time()
         expert_policy = loader(bc.experts_path[0]).to(device)
         expert_policy.eval()
         self.expert_policy = expert_policy
+        print(f"[worker] expert loaded in {time.time() - _t0:.1f}s", flush=True)
 
         # Exploration policy cache: path -> DiffusionPolicyWrapper
         self._exploration_cache: dict[str, DiffusionPolicyWrapper] = {}
@@ -480,10 +482,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
     step_dt = env_cfg.sim.dt * env_cfg.sim.render_interval
     max_episode_length = int(env_cfg.episode_length_s / step_dt)
 
+    print("[worker] building gym env...", flush=True)
+    _t0 = time.time()
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
+    print(f"[worker] gym.make done in {time.time() - _t0:.1f}s", flush=True)
     env = RslRlVecEnvWrapper(env)
+    print("[worker] RslRlVecEnvWrapper done", flush=True)
 
     device = torch.device(env_cfg.sim.device if isinstance(env_cfg.sim.device, str) else "cuda:0")
+    print(f"[worker] creating CollectionSession on device={device}...", flush=True)
+    _t0 = time.time()
     session = CollectionSession(
         env=env,
         env_cfg=env_cfg,
@@ -493,6 +501,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
         deterministic=args_cli.deterministic,
         apply_exploration_ratio_filter=args_cli.enable_exploration_ratio_filter,
     )
+    print(f"[worker] CollectionSession ready in {time.time() - _t0:.1f}s", flush=True)
     if args_cli.enable_exploration_ratio_filter:
         print("[worker] exploration-ratio < 0.95 filter is ENABLED by CLI flag.", flush=True)
 
@@ -508,6 +517,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
         pass
 
     # Connect back to the orchestrator and announce readiness.
+    print(f"[worker] connecting back to orchestrator at {args_cli.socket_path}...", flush=True)
     conn = _connect_to_orchestrator(args_cli.socket_path, args_cli.auth_key)
     conn.send({"status": "ready", "num_envs": env.num_envs, "max_episode_length": max_episode_length})
     print(f"[worker] connected to orchestrator at {args_cli.socket_path}; ready for jobs.", flush=True)
