@@ -195,6 +195,51 @@ gym.register(
     },
 )
 
+# ASTEROID: state-only data-collection env for distilling the augmented privileged policy
+# (trained with Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedTrainCfg) into a student
+# that observes only the basic state terms in BasePolicyCfg. Designed to be passed as
+# ``--data_task`` to ``run_incontext_exploration_parallel.py``.
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-Augmented-Distillation-DataCollection-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.asteroid_env_cfg:Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedDistillationCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Asymmetric_DAggerRunnerCfg",
+    },
+)
+
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-Augmented-Distillation-StudentEval-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.asteroid_env_cfg:Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedStudentEvalCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Base_PPORunnerCfg",
+    },
+)
+
+# RGB variant: same augmented-privileged expert distilled into an image-based student.
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-RGB-Privileged-Augmented-Distillation-DataCollection-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.asteroid_env_cfg:Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedRGBDistillationCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Asymmetric_DAggerRunnerCfg",
+    },
+)
+
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-RGB-Privileged-Augmented-Distillation-StudentEval-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.asteroid_env_cfg:Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedRGBStudentEvalCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Base_PPORunnerCfg",
+    },
+)
+
 gym.register(
     id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-WithContactDynamics-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",

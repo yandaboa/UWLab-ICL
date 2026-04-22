@@ -2232,6 +2232,157 @@ class ProximityAugmentationActivationCondition:
         )
 
 
+# Backwards-compat alias for pickled/stringified configs that reference the old name, which didn't distinguish between different activation conditions.
+AugmentationActivationCondition = ProximityAugmentationActivationCondition
+
+
+@dataclass
+class ContactGroup:
+    """One contact-state assertion used by :class:`ContactAugmentationActivationCondition`.
+
+    A group references a :class:`~isaaclab.sensors.ContactSensor` in the scene by name
+    and asserts that a set of sensor bodies are *all* either in contact (``touching=True``)
+    or *all* out of contact (``touching=False``) per env.
+
+    Args:
+        sensor_name: Name of a ``ContactSensorCfg`` entry in the scene (e.g. created with
+            ``prim_path="{ENV_REGEX_NS}/Robot/.*finger"``). The spawn config for the
+            underlying rigid bodies must have ``activate_contact_sensors=True``.
+        body_names: Regex, list of regexes, or ``None``. Selects which of the sensor's
+            bodies participate in this assertion. ``None`` uses all bodies covered by
+            the sensor.
+        filter_idx: If set, the sensor's ``filter_prim_paths_expr`` must be non-empty and
+            this selects which filter shapes (``sensor.data.force_matrix_w[:, :, k, :]``)
+            are considered. A body is treated as "in contact" if ANY selected filter
+            slot exceeds ``force_threshold``. If ``None``, uses net world-frame force
+            (``sensor.data.net_forces_w``) -- i.e. contact with anything.
+        touching: ``True`` requires every selected body to be in contact; ``False``
+            requires every selected body to be *out* of contact.
+        force_threshold: L2 norm (N) above which a body is considered "in contact".
+
+    Example (gripper fingers touching peg, peg not touching table)::
+
+        ContactGroup(sensor_name="gripper_peg_contact", touching=True),
+        ContactGroup(sensor_name="peg_table_contact", touching=False),
+    """
+
+    sensor_name: str
+    body_names: str | Sequence[str] | None = None
+    filter_idx: int | Sequence[int] | None = None
+    touching: bool = True
+    force_threshold: float = 1.0
+
+
+class ContactAugmentationActivationCondition:
+    """Contact-based ``activation_expr`` for ``conditional_arm_augmentation``.
+
+    Fires (per-env) iff every :class:`ContactGroup` in ``groups`` is satisfied: within
+    each group, all referenced sensor bodies are simultaneously in contact (for
+    ``touching=True``) or out of contact (for ``touching=False``).
+
+    Wiring requirements (set up in the scene cfg):
+
+    1.  Enable contact reporting on the rigid bodies you want to monitor. For assets
+        spawned from USD, that means ``RigidBodyPropertiesCfg(activate_contact_sensors=True)``
+        on their spawn cfg. For articulations (e.g. the robot), set the same flag on
+        the articulation's ``spawn.rigid_props``.
+    2.  Add one ``ContactSensorCfg`` per sensor body (or set of bodies sharing a
+        filter) to the ``InteractiveSceneCfg``. Example::
+
+            from isaaclab.sensors import ContactSensorCfg
+
+            gripper_peg_contact = ContactSensorCfg(
+                prim_path="{ENV_REGEX_NS}/Robot/.*inner_finger",
+                filter_prim_paths_expr=["{ENV_REGEX_NS}/InsertiveObject"],
+                update_period=0.0,
+                history_length=1,
+            )
+
+    3.  Reference the sensor's scene name from :class:`ContactGroup`.
+
+    Note:
+        Isaac Lab's contact-force filtering is "many-to-one": a sensor whose
+        ``prim_path`` matches multiple bodies per env returns ``force_matrix_w=None``.
+        Keep sensors single-body if you need per-filter forces, or omit ``filter_idx``
+        (uses net forces, which work for multi-body sensors).
+
+    Intentionally not callable, matching :class:`ProximityAugmentationActivationCondition`:
+    Isaac Lab's config round-trip stringifies callables and restores the *class*,
+    losing per-env state; the handler dispatches via ``.evaluate(env)`` instead.
+    """
+
+    def __init__(self, groups: Sequence[ContactGroup]) -> None:
+        if len(groups) == 0:
+            raise ValueError("ContactAugmentationActivationCondition requires at least one group.")
+        self._groups: list[ContactGroup] = list(groups)
+        # Resolved body indices per group, cached on first evaluate() after scene build.
+        self._body_ids_per_group: list[torch.Tensor | None] = [None] * len(self._groups)
+        self._filter_ids_per_group: list[torch.Tensor | None] = [None] * len(self._groups)
+
+    def reset(self, env_ids) -> None:
+        # Stateless per-env; nothing to re-sample.
+        return None
+
+    def _resolve_group(self, env: ManagerBasedRLEnv, idx: int) -> tuple[torch.Tensor, torch.Tensor | None]:
+        g = self._groups[idx]
+        sensor = cast(ContactSensor, env.scene.sensors[g.sensor_name])
+        body_ids_t = self._body_ids_per_group[idx]
+        if body_ids_t is None:
+            if g.body_names is None:
+                body_ids = list(range(sensor.num_bodies))
+            else:
+                body_ids, _ = sensor.find_bodies(g.body_names)
+            if len(body_ids) == 0:
+                raise ValueError(
+                    f"ContactGroup[{idx}]: no sensor bodies matched body_names={g.body_names!r} "
+                    f"in sensor '{g.sensor_name}' (available: {sensor.body_names})."
+                )
+            body_ids_t = torch.as_tensor(body_ids, device=env.device, dtype=torch.long)
+            self._body_ids_per_group[idx] = body_ids_t
+
+        filter_ids_t = self._filter_ids_per_group[idx]
+        if g.filter_idx is not None and filter_ids_t is None:
+            filter_idx = [g.filter_idx] if isinstance(g.filter_idx, int) else list(g.filter_idx)
+            filter_ids_t = torch.as_tensor(filter_idx, device=env.device, dtype=torch.long)
+            self._filter_ids_per_group[idx] = filter_ids_t
+
+        return body_ids_t, filter_ids_t
+
+    def evaluate(self, env: ManagerBasedRLEnv) -> torch.Tensor:
+        result = torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
+        for i, g in enumerate(self._groups):
+            body_ids, filter_ids = self._resolve_group(env, i)
+            sensor = cast(ContactSensor, env.scene.sensors[g.sensor_name])
+            threshold = float(g.force_threshold)
+
+            if filter_ids is None:
+                # net_forces_w: (num_envs, num_bodies, 3); body is in contact with anything
+                net_forces = sensor.data.net_forces_w
+                assert net_forces is not None
+                forces = net_forces[:, body_ids, :]
+                in_contact = forces.norm(dim=-1) > threshold  # (num_envs, B)
+            else:
+                matrix = sensor.data.force_matrix_w
+                if matrix is None:
+                    raise RuntimeError(
+                        f"ContactGroup[{i}] specified filter_idx={g.filter_idx!r} but sensor "
+                        f"'{g.sensor_name}' has no force_matrix_w. Set "
+                        "`filter_prim_paths_expr` on its ContactSensorCfg, and ensure the "
+                        "sensor maps to a single body per env (Isaac Lab's filtering is "
+                        "many-to-one)."
+                    )
+                # force_matrix_w: (num_envs, num_bodies, num_filters, 3)
+                forces = matrix[:, body_ids][:, :, filter_ids, :]
+                in_contact = (forces.norm(dim=-1) > threshold).any(dim=-1)  # (num_envs, B)
+
+            if g.touching:
+                group_mask = in_contact.all(dim=-1)
+            else:
+                group_mask = (~in_contact).all(dim=-1)
+            result &= group_mask
+        return result
+
+
 class randomize_arm_from_sysid(ManagerTermBase):
     """Randomize arm joint dynamics around sysid nominal values.
 

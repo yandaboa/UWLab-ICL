@@ -33,21 +33,27 @@ or
 python scripts/reinforcement_learning/rsl_rl/play.py     --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-ContactDynamics-Play-v0     --num_envs 1024     --checkpoint logs/rsl_rl/ur5e_robotiq_2f85_omnireset_agent/2026-04-08_18-31-13/model_3200.pt    env.scene.insertive_object=fbdrawerbottom     env.scene.receptive_object=fbdrawerbox --headless --num_steps 500
 ```
 
+## Training a policy on state + time based action + force augmentations:
+```
+python scripts/reinforcement_learning/rsl_rl/play.py     --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-Augmented-Play-v0     --num_envs 1     --checkpoint logs/rsl_rl/ur5e_robotiq_2f85_omnireset_agent/2026-04-21_01-36-13/model_3700.pt     env.scene.insertive_object=peg     env.scene.receptive_object=peghole --video --video_length 100 --headless
+```
+
 ## Running ASTEROID:
 ```
-python run_incontext_exploration.py \
-    --data_task OmniReset-Ur5eRobotiq2f85-POMDP-ContactDynamics-v0 \
-    --eval_task OmniReset-Ur5eRobotiq2f85-POMDP-ContactDynamics-Play-v0 \
-    --expert_policy_checkpoint contact_expert.pt \
-    --config_name in_context_exploration_state.yaml \
-    --output_dir logs/incontext_exploration \
-    --exp_name incontext_exploration \
-    --wandb_project incontext_exploration \
-    --num_demos 10000 \
-    --num_data_envs 1024 \
-    --num_eval_envs 1024 \
-    --num_eval_episodes 2 \
-    --max_iterations 3 \
-    --insertive_object fbdrawerbottom \
-    --receptive_object fbdrawerbox
+python run_incontext_exploration_parallel.py \
+  --expert_policy_checkpoint logs/rsl_rl/ur5e_robotiq_2f85_omnireset_agent/2026-04-21_01-36-13/exported/policy.pt \
+  --config_name in_context_adaptation.yaml \
+  --exp_name incontext_adaptation \
+  --wandb_project incontext_adaptation \
+  --output_dir logs/in_context_adaptation \
+  --num_demos 20000 \
+  --num_data_envs 8096 \
+  --num_eval_envs 32 \
+  --num_eval_episodes 32 \
+  --max_iterations 4 \
+  --data_gpu 2 \
+  --train_gpu 3 \
+  --insertive_object peg \
+  --receptive_object peghole \
+  --no_video
 ```

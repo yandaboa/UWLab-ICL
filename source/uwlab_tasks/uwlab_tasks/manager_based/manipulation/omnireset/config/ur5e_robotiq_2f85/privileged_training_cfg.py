@@ -1,6 +1,12 @@
 from isaaclab.sim import configclass
 
-from uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.rl_state_cfg import Ur5eRobotiq2f85RelCartesianOSCTrainCfg, TrainEventCfg, ObservationsCfg, Ur5eRobotiq2f85RelCartesianOSCFinetuneEvalCfg
+from uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.rl_state_cfg import (
+    ObservationsCfg,
+    RlStateSceneCfg,
+    TrainEventCfg,
+    Ur5eRobotiq2f85RelCartesianOSCFinetuneEvalCfg,
+    Ur5eRobotiq2f85RelCartesianOSCTrainCfg,
+)
 from uwlab_assets.robots.ur5e_robotiq_gripper.ur5e_robotiq_2f85_gripper import EXPLICIT_UR5E_ROBOTIQ_2F85
 
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -8,6 +14,7 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.sensors import ContactSensorCfg
 
 from ... import mdp as task_mdp
 from uwlab_assets import UWLAB_CLOUD_ASSETS_DIR
@@ -412,11 +419,15 @@ class StateTriggeredAugmentationTrainEventsCfg(RandomizeGainsTrainEventsCfg):
             "action_offset_range": (
                 (3.0, 3.0, 3.0, 2.0, 2.0, 2.0),
                 (7.0, 7.0, 7.0, 3.0, 3.0, 3.0),
+                # (1.0, 1.0, 1.0, 0.5, 0.5, 0.5),
+                # (4.0, 4.0, 4.0, 2.0, 2.0, 2.0),
             ),
             # Force: per-axis task-frame force bias (added to OSC task-force output).
             "task_frame_force_bias_range": (
                 (3.0, 3.0, 3.0, 2.0, 2.0, 2.0),
                 (10.0, 10.0, 10.0, 5.0, 5.0, 5.0),
+                # (1.0, 1.0, 1.0, 0.5, 0.5, 0.5),
+                # (5.0, 5.0, 5.0, 2.0, 2.0, 2.0),
             ),
         },
     )
@@ -435,11 +446,74 @@ class StateTriggeredAugmentationEvalEventsCfg(StateTriggeredAugmentationTrainEve
         mode="reset",
         params={
             "dataset_dir": f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/OmniReset",
-            "reset_types": ["ObjectAnywhereEEAnywhere"],
+            # "reset_types": ["ObjectAnywhereEEAnywhere"],
+            "reset_types": ["ObjectRestingEEGrasped"], # making reset states easier
             "probs": [1.0],
             "success": "env.reward_manager.get_term_cfg('progress_context').func.success",
         },
     )
+
+
+# @configclass
+# class ContactTriggeredAugmentationExampleSceneCfg(RlStateSceneCfg):
+#     """Example scene wiring for contact-triggered augmentation activation.
+
+#     This class is intentionally not referenced by any env cfg. It exists as a
+#     copy-paste template showing how to wire the contact sensors required by
+#     ``task_mdp.ContactAugmentationActivationCondition``.
+#     """
+
+#     robot = RlStateSceneCfg.robot.replace(
+#         spawn=RlStateSceneCfg.robot.spawn.replace(activate_contact_sensors=True)
+#     )
+#     insertive_object = RlStateSceneCfg.insertive_object.replace(  # type: ignore[attr-defined]
+#         spawn=RlStateSceneCfg.insertive_object.spawn.replace(activate_contact_sensors=True)  # type: ignore[attr-defined]
+#     )
+#     table = RlStateSceneCfg.table.replace(  # type: ignore[attr-defined]
+#         spawn=RlStateSceneCfg.table.spawn.replace(activate_contact_sensors=True)  # type: ignore[attr-defined]
+#     )
+
+#     # Single-body sensors on the insertive object with one filter each.
+#     insertive_vs_gripper_contact = ContactSensorCfg(
+#         prim_path="{ENV_REGEX_NS}/InsertiveObject",
+#         filter_prim_paths_expr=["{ENV_REGEX_NS}/Robot/.*finger.*"],
+#         update_period=0.0,
+#         history_length=1,
+#     )
+#     insertive_vs_table_contact = ContactSensorCfg(
+#         prim_path="{ENV_REGEX_NS}/InsertiveObject",
+#         filter_prim_paths_expr=["{ENV_REGEX_NS}/Table"],
+#         update_period=0.0,
+#         history_length=1,
+#     )
+
+
+# @configclass
+# class ContactTriggeredAugmentationExampleEventsCfg(StateTriggeredAugmentationTrainEventsCfg):
+#     """Example event cfg that uses ``ContactAugmentationActivationCondition``.
+
+#     This class is intentionally not referenced by any env cfg.
+#     """
+
+#     def __post_init__(self):
+#         if self.augmentation_handler is None:
+#             return
+#         self.augmentation_handler.params["activation_expr"] = task_mdp.ContactAugmentationActivationCondition(
+#             groups=[
+#                 task_mdp.ContactGroup(
+#                     sensor_name="insertive_vs_gripper_contact",
+#                     filter_idx=0,
+#                     touching=True,
+#                     force_threshold=1.0,
+#                 ),
+#                 task_mdp.ContactGroup(
+#                     sensor_name="insertive_vs_table_contact",
+#                     filter_idx=0,
+#                     touching=False,
+#                     force_threshold=1.0,
+#                 ),
+#             ]
+#         )
 
 @configclass
 class RandomizeContactDynamicsTrainEventsCfg(TrainEventCfg):
