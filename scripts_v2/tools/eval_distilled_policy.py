@@ -12,6 +12,16 @@
 
 """Launch Isaac Sim Simulator first."""
 
+# NOTE: Pre-import numpy and numba BEFORE isaaclab / AppLauncher. Isaac Sim's Kit runtime
+# mutates sys.path at startup, which causes any later `import numba` to resolve to
+# /isaac-sim/exts/omni.isaac.core_archive/pip_prebundle/numba (0.59.x, incompatible with
+# numpy 2.x) instead of the conda env's pinned numba 0.64. By importing them here while
+# PYTHONPATH ordering still holds, sys.modules caches the correct versions and every
+# subsequent `import numba` (e.g. via diffusion_policy.common.sampler when Hydra loads
+# TrainMLPImageWorkspace for the policy checkpoint) returns the cached conda module.
+import numpy  # noqa: F401
+import numba  # noqa: F401
+
 import argparse
 
 from isaaclab.app import AppLauncher

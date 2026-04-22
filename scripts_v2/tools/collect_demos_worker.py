@@ -18,6 +18,16 @@ the orchestration loop.
 
 """Launch Isaac Sim Simulator first."""
 
+# NOTE: Pre-import numpy and numba BEFORE isaaclab / AppLauncher. Isaac Sim's Kit runtime
+# mutates sys.path at startup, which causes any later `import numba` to resolve to
+# /isaac-sim/exts/omni.isaac.core_archive/pip_prebundle/numba (0.59.x, incompatible with
+# numpy 2.x) instead of the conda env's pinned numba 0.64. By importing them here while
+# PYTHONPATH ordering still holds, sys.modules caches the correct versions and every
+# subsequent `import numba` (e.g. via diffusion_policy.common.sampler when Hydra loads
+# TrainMLPImageWorkspace for the learner checkpoint) returns the cached conda module.
+import numpy  # noqa: F401
+import numba  # noqa: F401
+
 import argparse
 import contextlib
 import gymnasium as gym
@@ -350,16 +360,21 @@ class CollectionSession:
         exploration_lengths = torch.zeros((num_envs,), device=device, dtype=torch.int32)
         self.recorder_manager.exploration_lengths = exploration_lengths
 
-        # Reset all envs to make sure the recorder starts cleanly for this job.
-        env.reset()
-        if exploration_policy is not None:
-            exploration_policy.reset(torch.arange(num_envs, device=device))
-
         current_recorded_demo_count = 0
         start_time = time.time()
         deterministic = self.deterministic
 
+        # NOTE: env.reset() must run inside inference_mode. After the first rollout,
+        # Isaac Lab's PhysX-backed buffers (e.g. ``self._data.root_link_pose_w``) become
+        # inference tensors and cannot be written to outside inference_mode on subsequent
+        # jobs. The rollout's internal ``_reset_idx`` already runs inside inference_mode
+        # for the same reason; we extend the context to cover the per-job reset here.
         with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
+            # Reset all envs to make sure the recorder starts cleanly for this job.
+            env.reset()
+            if exploration_policy is not None:
+                exploration_policy.reset(torch.arange(num_envs, device=device))
+
             pbar = tqdm(total=num_demos, desc=f"Recording demos → {os.path.basename(dataset_file)}", unit="demo")
 
             while True:
@@ -377,12 +392,16 @@ class CollectionSession:
                     expert_actions = mean if deterministic else torch.normal(mean, std)
                     actions[use_expert] = expert_actions[use_expert]
                 if use_exploration.any() and exploration_policy is not None:
-                    # NOTE: this mirrors collect_demos_asteroid.py which references a module-level
-                    # ``obs_dict`` variable. In the persistent worker we build a fresh obs dict here
-                    # from the env to keep things self-contained.
+                    # Match OctiLab collect_demos.py convention: only feed obs for envs actually
+                    # running exploration (so transformer per-env trajectories grow only on those
+                    # steps) and pass their absolute env ids alongside.
+                    exploration_env_ids = use_exploration.nonzero(as_tuple=False).reshape(-1)
                     obs_dict = env.unwrapped.obs_buf
-                    exploration_actions = exploration_policy.predict_action(obs_dict).to(device)
-                    actions[use_exploration] = exploration_actions[use_exploration]
+                    policy_obs = obs_dict.get("policy", obs_dict) if isinstance(obs_dict, dict) else obs_dict
+                    exploration_obs = {k: v[use_exploration] for k, v in policy_obs.items()}
+                    exploration_actions = exploration_policy.predict_action(exploration_obs, exploration_env_ids)
+                    exploration_actions = exploration_actions.to(device)
+                    actions[use_exploration] = exploration_actions
 
                 # Zero actions on the first step after a reset (first image may not be valid).
                 first_step_mask = env.unwrapped.episode_length_buf == 0
