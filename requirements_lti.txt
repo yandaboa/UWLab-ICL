@@ -1,0 +1,47 @@
+# Top-level pip requirements for the `lti` conda env.
+#
+# This file lists ONLY the packages whose versions we care about intentionally
+# (because UWLab/Isaac Lab needs a specific version, or because newer versions
+# broke something in this pipeline). Everything else is free to float to
+# whatever `pip` resolves.
+#
+# For an exact bit-for-bit snapshot of every transitive dep, see
+# `requirements_lti.lock.txt` (generated via `pip freeze --exclude-editable`).
+#
+# Bootstrap on a new machine:
+#
+#   conda create -n lti python=3.11 -y
+#   conda activate lti
+#   pip install torch==2.7.0 torchvision --index-url https://download.pytorch.org/whl/cu128
+#   pip install -r requirements_lti.txt
+#   # editable installs from this repo (order matters: isaaclab first):
+#   pip install -e _isaaclab/IsaacLab/source/isaaclab
+#   pip install -e _isaaclab/IsaacLab/source/isaaclab_assets
+#   pip install -e _isaaclab/IsaacLab/source/isaaclab_rl
+#   pip install -e _isaaclab/IsaacLab/source/isaaclab_tasks
+#   pip install -e source/uwlab
+#   pip install -e source/uwlab_assets
+#   pip install -e source/uwlab_rl
+#   pip install -e source/uwlab_tasks
+#   pip install -e diffusion_policy
+#   pip install -e rsl_rl
+#   # (metalearning is internal; install separately if needed)
+
+# --- UWLab-authoritative pins (source/uwlab_tasks/setup.py) ------------------
+# Newer zarr 3.x uses an async API incompatible with uwlab.utils.datasets.
+# numcodecs >= 0.16 removed the legacy Blosc/registry API that zarr 2.x and
+# uwlab_tasks depend on.
+zarr==2.18.3
+numcodecs==0.13.1
+
+# --- diffusion_policy runtime --------------------------------------------------
+# Only `diffusers` was strictly required on top of the Isaac Lab base env.
+# 0.37.1 works with our patched `diffusion_policy/model/common/lr_scheduler.py`
+# (imports Union/Optional/Optimizer from their real sources instead of from
+# `diffusers.optimization`).
+diffusers==0.37.1
+
+# --- install notes (do not pin here) -----------------------------------------
+# Isaac Lab is pinned by the editable install of _isaaclab/IsaacLab/source/*.
+# PyTorch is installed out-of-band via the CUDA index URL above (don't list it
+# here because pip's default index can't see the cuXYZ wheels).
