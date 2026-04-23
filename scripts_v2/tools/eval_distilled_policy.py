@@ -43,6 +43,16 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
 parser.add_argument("--use_amp", action="store_true", default=False, help="Use automatic mixed precision.")
 parser.add_argument("--save_video", action="store_true", default=False, help="Save video of the policy.")
+parser.add_argument(
+    "--transformer_mini_batch_size",
+    type=int,
+    default=64,
+    help=(
+        "Mini-batch size used by DiffusionPolicyWrapper when serializing transformer inference"
+        " across envs. Bounds peak activation memory; too-small values dominate wall time for"
+        " large num_envs."
+    ),
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -186,7 +196,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
 
     policy = _load_policy(args_cli.checkpoint, device)
-    wrapped_policy = DiffusionPolicyWrapper(policy, device, n_obs_steps=policy.n_obs_steps, num_envs=args_cli.num_envs)
+    wrapped_policy = DiffusionPolicyWrapper(
+        policy,
+        device,
+        n_obs_steps=policy.n_obs_steps,
+        num_envs=args_cli.num_envs,
+        mini_batch_size=args_cli.transformer_mini_batch_size,
+    )
 
     obs_dict, _ = env.reset()
     dones = torch.ones(args_cli.num_envs, dtype=torch.bool, device=device)

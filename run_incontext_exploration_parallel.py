@@ -147,6 +147,10 @@ class CollectionWorker:
         seed: int,
         no_video: bool,
         enable_exploration_ratio_filter: bool = False,
+        transformer_mini_batch_size: int = 64,
+        use_kv_cache: bool = True,
+        kv_cache_max_seq_len: int | None = None,
+        profile_worker: bool = False,
         python_executable: str | None = None,
         startup_timeout_s: float = 1200.0,
         log_dir: str | None = None,
@@ -181,6 +185,8 @@ class CollectionWorker:
             self.auth_key,
             "--seed",
             str(seed),
+            "--transformer_mini_batch_size",
+            str(transformer_mini_batch_size),
             "--headless",
             "--device",
             f"cuda:{gpu_id}",
@@ -193,10 +199,17 @@ class CollectionWorker:
             cmd.append("--enable_cameras")
         if enable_exploration_ratio_filter:
             cmd.append("--enable_exploration_ratio_filter")
+        if not use_kv_cache:
+            cmd.append("--no_kv_cache")
+        if kv_cache_max_seq_len is not None:
+            cmd.extend(["--kv_cache_max_seq_len", str(kv_cache_max_seq_len)])
 
         env = os.environ.copy()
         env.pop("CUDA_VISIBLE_DEVICES", None)
         env.setdefault("PYTHONUNBUFFERED", "1")
+        if profile_worker:
+            env["DIFFUSION_POLICY_PROFILE"] = "1"
+            env.setdefault("DIFFUSION_POLICY_PROFILE_EVERY", "50")
 
         if log_dir is None:
             base = os.path.abspath(os.path.join(os.getcwd(), "logs", "dagger_worker"))
@@ -429,6 +442,7 @@ def launch_eval_policy(
     receptive_object: str | None = None,
     no_video: bool = False,
     seed: int = 0,
+    transformer_mini_batch_size: int = 64,
 ) -> subprocess.Popen:
     command = [
         sys.executable,
@@ -441,6 +455,8 @@ def launch_eval_policy(
         str(num_trajectories),
         "--num_envs",
         str(num_envs),
+        "--transformer_mini_batch_size",
+        str(transformer_mini_batch_size),
         "--headless",
         "--checkpoint",
         checkpoint,
@@ -547,6 +563,43 @@ def main() -> None:
             " successful episode. Off by default; some tasks want this gate, most don't."
         ),
     )
+    parser.add_argument(
+        "--transformer_mini_batch_size",
+        type=int,
+        default=64,
+        help=(
+            "Mini-batch size used by DiffusionPolicyWrapper when serializing transformer inference"
+            " across envs, forwarded to both the collection worker and the eval subprocess. Bounds"
+            " peak activation memory; too-small values (e.g. 8) dominate wall time for large"
+            " num_data_envs."
+        ),
+    )
+    parser.add_argument(
+        "--no_kv_cache",
+        action="store_true",
+        help=(
+            "Forwarded to the collection worker: disable incremental KV-cached inference in"
+            " DiffusionPolicyWrapper and fall back to re-encoding the full trajectory each step."
+            " Useful for A/B profiling; normally you want KV caching on."
+        ),
+    )
+    parser.add_argument(
+        "--kv_cache_max_seq_len",
+        type=int,
+        default=None,
+        help=(
+            "Upper bound on per-env KV cache length forwarded to the worker. Defaults to the"
+            " transformer's n_positions (usually 1024)."
+        ),
+    )
+    parser.add_argument(
+        "--profile_worker",
+        action="store_true",
+        help=(
+            "Set DIFFUSION_POLICY_PROFILE=1 in the collection worker environment so the"
+            " DiffusionPolicyWrapper emits per-stage inference timings."
+        ),
+    )
     args = parser.parse_args()
 
     sampling_ratio_curriculum = [
@@ -614,6 +667,10 @@ def main() -> None:
         seed=args.seed,
         no_video=args.no_video,
         enable_exploration_ratio_filter=args.enable_exploration_ratio_filter,
+        transformer_mini_batch_size=args.transformer_mini_batch_size,
+        use_kv_cache=not args.no_kv_cache,
+        kv_cache_max_seq_len=args.kv_cache_max_seq_len,
+        profile_worker=args.profile_worker,
     )
 
     try:
@@ -704,6 +761,7 @@ def main() -> None:
                     receptive_object=args.receptive_object,
                     no_video=args.no_video,
                     seed=args.seed,
+                    transformer_mini_batch_size=args.transformer_mini_batch_size,
                 )
 
             next_dataset_path: str | None = None

@@ -3,9 +3,18 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
+import time
 import torch
 from abc import ABC, abstractmethod
 from typing import Any
+
+try:
+    from transformers import DynamicCache  # type: ignore
+    _HAS_DYNAMIC_CACHE = True
+except Exception:  # noqa: BLE001
+    DynamicCache = None  # type: ignore
+    _HAS_DYNAMIC_CACHE = False
 
 
 class ObservationHistoryManager(ABC):
@@ -172,10 +181,255 @@ class ImageObservationSequence(ImageObservationHistory):
         return obs_batch
 
 
+class TransformerKVCacheManager:
+    """Per-environment KV cache for a GPT-2-style transformer policy.
+
+    This class is **token-structure agnostic**: it neither knows nor cares how many tokens
+    the policy emits per environment step, what those tokens mean (obs, action, separator,
+    …), or in what order they appear. It only tracks, per env:
+
+    * a per-layer K/V store preallocated to shape
+      ``(num_layers, num_envs, n_heads, max_seq_len, head_dim)`` for each of keys and values
+    * an integer ``lengths[i]`` counting how many tokens have been appended for env ``i``
+
+    The policy is responsible for building ``inputs_embeds``, ``attention_mask``, and
+    ``position_ids``; it tells the manager via :meth:`append` how many tokens it added this
+    step (``num_new_tokens``), and the manager writes the last ``num_new_tokens`` rows of the
+    transformer's returned cache into each env's next free slots.
+
+    This means a policy that e.g. interleaves ``[obs_t, act_t]`` pairs works out of the box:
+    it just returns ``num_new_tokens=2`` from its step method and the manager appends both
+    rows contiguously per env, correctly tracking per-env lengths even as envs reset at
+    different wall-clock times.
+
+    Resets are cheap: only the per-env length counter is zeroed; stale KV bytes are
+    harmless because the policy-built ``attention_mask`` gates them out.
+    """
+
+    def __init__(
+        self,
+        num_envs: int,
+        num_layers: int,
+        n_heads: int,
+        head_dim: int,
+        max_seq_len: int,
+        device: torch.device,
+        storage_dtype: torch.dtype = torch.bfloat16,
+        compute_dtype: torch.dtype = torch.float32,
+    ) -> None:
+        """
+        Args:
+            storage_dtype: On-device dtype used for the preallocated KV cache. Default
+                ``bfloat16`` halves memory (~17GB → ~8.5GB at 1024 envs × 1024 max_seq_len
+                × 4 layers × 4 heads × 64 head_dim) relative to fp32 with negligible
+                precision loss for inference. Cast to ``compute_dtype`` at :meth:`gather`
+                time before handing to the transformer.
+            compute_dtype: Dtype the transformer expects for ``past_key_values`` on its
+                forward. Should match the model's parameter dtype (fp32 for an unconverted
+                GPT-2, fp16/bf16 if the model was cast for inference).
+
+            Deferred TODO (fp8 cache): ``torch.float8_e4m3fn`` would further halve
+            memory but needs per-tensor (or per-head/per-channel) scale factors to stay
+            within its ~±448 range without saturating, verified fp8 indexing support on
+            the deployed PyTorch, and fp8↔compute-dtype cast overhead on every
+            gather/append. Only worth the engineering if bf16 cache becomes the
+            bottleneck.
+        """
+        self.num_envs = num_envs
+        self.num_layers = num_layers
+        self.n_heads = n_heads
+        self.head_dim = head_dim
+        self.max_seq_len = max_seq_len
+        self.device = device
+        self.storage_dtype = storage_dtype
+        self.compute_dtype = compute_dtype
+        # Env-first layout: putting ``num_envs`` in axis 0 makes env-indexed gathers /
+        # scatters hit a contiguous per-env slab (all layers × heads × slots × dim),
+        # letting us replace the old Python per-layer loop with a single tensor op.
+        self.cache_k = torch.zeros(
+            (num_envs, num_layers, n_heads, max_seq_len, head_dim),
+            device=device, dtype=storage_dtype,
+        )
+        self.cache_v = torch.zeros(
+            (num_envs, num_layers, n_heads, max_seq_len, head_dim),
+            device=device, dtype=storage_dtype,
+        )
+        self.lengths = torch.zeros((num_envs,), device=device, dtype=torch.long)
+
+    def _to_tensor(self, env_ids) -> torch.Tensor:
+        if isinstance(env_ids, torch.Tensor):
+            return env_ids.to(self.device, dtype=torch.long)
+        return torch.tensor(list(env_ids), device=self.device, dtype=torch.long)
+
+    def reset(self, env_ids) -> None:
+        if env_ids is None:
+            self.lengths.zero_()
+            return
+        env_ids_t = self._to_tensor(env_ids)
+        if env_ids_t.numel() == 0:
+            return
+        self.lengths[env_ids_t] = 0
+
+    def gather(self, env_ids):
+        """Return (past_key_values, past_lengths, max_past) for the requested envs.
+
+        ``past_key_values`` is a tuple of (K, V) per layer, each shaped
+        ``(B, n_heads, max_past, head_dim)`` in ``compute_dtype``, or ``None`` when every
+        env starts empty.
+        """
+        env_ids_t = self._to_tensor(env_ids)
+        past_lengths = self.lengths[env_ids_t]
+        max_past = int(past_lengths.max().item()) if past_lengths.numel() > 0 else 0
+        if max_past == 0:
+            return None, past_lengths, 0
+        # One-shot env-indexed fetch: all layers / heads / slots at once.
+        k = self.cache_k[env_ids_t, :, :, :max_past, :].to(self.compute_dtype)
+        v = self.cache_v[env_ids_t, :, :, :max_past, :].to(self.compute_dtype)
+        # Split by layer into HF's legacy per-layer (K, V) tuple list.
+        past_kvs = tuple(
+            (k[:, layer].contiguous(), v[:, layer].contiguous())
+            for layer in range(self.num_layers)
+        )
+        # Deferred TODO (DynamicCache-native): HF converts this legacy tuple into a
+        # ``DynamicCache`` internally on every forward. Storing/returning a
+        # ``DynamicCache`` directly (mutated in-place via ``.update()``) would skip that
+        # wrapping. ``from_legacy_cache`` is a thin reference-storing wrapper though, so
+        # this is likely cosmetic — revisit if profiling shows it matters.
+        if _HAS_DYNAMIC_CACHE:
+            past_kvs = DynamicCache.from_legacy_cache(past_kvs)
+        return past_kvs, past_lengths, max_past
+
+    def append(
+        self,
+        env_ids,
+        new_past_key_values,
+        past_lengths: torch.Tensor,
+        num_new_tokens: int = 1,
+    ) -> None:
+        """Write the last ``num_new_tokens`` rows of the model's returned cache per env.
+
+        The policy is assumed to have appended ``num_new_tokens`` uniformly across the
+        batch this step; the manager writes them into each env's slots
+        ``[past_lengths[i], past_lengths[i] + num_new_tokens)``. Per-env ``lengths`` are
+        bumped by ``num_new_tokens``. Out-of-bounds slots are clamped to
+        ``max_seq_len - 1`` (last-slot overwrite) rather than raising, mirroring the
+        behaviour on episode lengths that exceed the preallocated cache.
+
+        Env-first cache layout lets the final scatter be a single advanced-indexed
+        assignment per new-token offset, with the (layer, head, head_dim) axes swept
+        vectorized in one kernel — no per-layer Python loop.
+        """
+        assert num_new_tokens >= 1, f"num_new_tokens must be >= 1, got {num_new_tokens}"
+        env_ids_t = self._to_tensor(env_ids)
+        # Stack the model's per-layer last-``num_new_tokens`` rows into a single
+        # (B, num_layers, n_heads, num_new_tokens, head_dim) tensor. The stacking itself
+        # iterates over layers in Python but only to collect references; the actual
+        # memory traffic is one fused scatter below.
+        k_stack = torch.stack(
+            [new_past_key_values[layer][0][:, :, -num_new_tokens:, :]
+             for layer in range(self.num_layers)],
+            dim=1,
+        ).to(self.storage_dtype)
+        v_stack = torch.stack(
+            [new_past_key_values[layer][1][:, :, -num_new_tokens:, :]
+             for layer in range(self.num_layers)],
+            dim=1,
+        ).to(self.storage_dtype)
+        # Advanced indexing with (env_ids, slots) tensor pair at non-contiguous axes
+        # produces an LHS of shape (B, num_layers, n_heads, head_dim); RHS matches.
+        # In the common case ``num_new_tokens == 1`` this is a single scatter.
+        for j in range(num_new_tokens):
+            slots = (past_lengths + j).clamp(max=self.max_seq_len - 1)
+            self.cache_k[env_ids_t, :, :, slots, :] = k_stack[:, :, :, j, :]
+            self.cache_v[env_ids_t, :, :, slots, :] = v_stack[:, :, :, j, :]
+        self.lengths[env_ids_t] = (past_lengths + num_new_tokens).clamp(max=self.max_seq_len)
+
+
+class _ProfileAccumulator:
+    """Lightweight per-stage wall-clock accumulator for inference profiling.
+
+    Tracks seconds spent in each labeled block (e.g. ``encode``, ``transformer``) plus per-call
+    env counts, and emits a compact summary every ``print_every_calls`` invocations. Enabled by
+    setting ``DIFFUSION_POLICY_PROFILE=1`` in the environment so runs not interested in timing
+    pay nothing.
+    """
+
+    def __init__(self, name: str, enabled: bool, print_every_calls: int = 50, device: torch.device | None = None) -> None:
+        self.name = name
+        self.enabled = enabled
+        self.print_every_calls = max(1, int(print_every_calls))
+        self.device = device
+        self.counts: dict[str, int] = {}
+        self.total_s: dict[str, float] = {}
+        self.calls = 0
+        self.total_envs_stepped = 0
+        self.since_last_envs = 0
+        self.since_last_s: dict[str, float] = {}
+
+    def step_start(self, num_envs: int) -> None:
+        if not self.enabled:
+            return
+        self.calls += 1
+        self.total_envs_stepped += num_envs
+        self.since_last_envs += num_envs
+
+    def _sync(self) -> None:
+        if self.device is not None and self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def time_block(self, label: str):
+        prof = self
+
+        class _Ctx:
+            def __enter__(self_inner):
+                if prof.enabled:
+                    prof._sync()
+                    self_inner._t0 = time.time()
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                if prof.enabled:
+                    prof._sync()
+                    dt = time.time() - self_inner._t0
+                    prof.total_s[label] = prof.total_s.get(label, 0.0) + dt
+                    prof.since_last_s[label] = prof.since_last_s.get(label, 0.0) + dt
+                    prof.counts[label] = prof.counts.get(label, 0) + 1
+                return False
+
+        return _Ctx()
+
+    def maybe_print(self) -> None:
+        if not self.enabled:
+            return
+        if self.calls % self.print_every_calls != 0:
+            return
+        parts = [f"{label}={s * 1000 / max(1, self.print_every_calls):.2f}ms/call"
+                 for label, s in self.since_last_s.items()]
+        env_rate = self.since_last_envs / max(1e-9, sum(self.since_last_s.values())) if self.since_last_s else 0.0
+        print(
+            f"[profile:{self.name}] call={self.calls} envs_last_window={self.since_last_envs} "
+            f"env_throughput={env_rate:.0f} envs/s " + " ".join(parts),
+            flush=True,
+        )
+        self.since_last_envs = 0
+        self.since_last_s = {}
+
+
 class DiffusionPolicyWrapper:
     """Wraps diffusion policy to handle Isaac Lab environment observations and action execution."""
 
-    def __init__(self, policy, device: torch.device, n_obs_steps: int = 2, num_envs: int = 1):
+    def __init__(
+        self,
+        policy,
+        device: torch.device,
+        n_obs_steps: int = 2,
+        num_envs: int = 1,
+        mini_batch_size: int = 64,
+        use_kv_cache: bool = True,
+        kv_cache_max_seq_len: int | None = None,
+        kv_cache_storage_dtype: torch.dtype = torch.bfloat16,
+        profile_name: str = "exploration",
+    ):
         """Initialize the policy wrapper.
 
         Args:
@@ -184,11 +438,32 @@ class DiffusionPolicyWrapper:
             n_obs_steps: Number of observation steps to maintain in history (unused by the
                 transformer path, which keeps a full per-env trajectory).
             num_envs: Number of environments to handle.
+            mini_batch_size: Batch size used to serialize inference calls across envs in
+                :meth:`_get_action_chunks`. Bounds peak transformer activation memory while
+                keeping per-step throughput high (default 64).
+            use_kv_cache: If True *and* the policy is a GPT2-based transformer that exposes
+                a ``kv_cached_step`` method, route inference through an incremental
+                KV-cached path. The policy decides how many tokens to emit per step (via
+                its ``_embed_new_step`` / ``num_new_tokens`` return), so this path works
+                for any per-step token structure (1 obs token, interleaved obs+action,
+                multi-modal fusion, …) without changes here. Brings per-step cost from
+                O(T) to O(1) amortized.
+            kv_cache_max_seq_len: Upper bound on the per-env cache length (pre-allocated). Defaults
+                to the transformer's ``n_positions`` when available, else 1024. Episodes longer
+                than this silently overwrite the last slot rather than crashing.
+            kv_cache_storage_dtype: On-device dtype for the preallocated KV cache. Default
+                ``bfloat16`` halves memory vs fp32 with negligible precision loss for
+                inference; cast back to the model's compute dtype at gather time. Pass
+                ``torch.float32`` to keep the storage precision (e.g. for numerical
+                equivalence checks against a non-cached forward).
+            profile_name: Prefix used for the optional profiling prints emitted when
+                ``DIFFUSION_POLICY_PROFILE=1`` is set in the environment.
         """
         self.policy = policy
         self.device = device
         self.n_obs_steps = n_obs_steps
         self.num_envs = num_envs
+        self.mini_batch_size = mini_batch_size
 
         self.is_image_policy = self._is_image_policy()
         self.is_transformer = self._is_transformer()
@@ -203,7 +478,69 @@ class DiffusionPolicyWrapper:
         else:
             self.obs_history_manager = LowDimObservationHistory(num_envs, n_obs_steps, device)
 
+        # KV-cache setup (transformer-only). The policy is the sole authority on what a
+        # "step" means in token space, so we only require it to expose ``kv_cached_step``.
+        self.use_kv_cache = bool(use_kv_cache) and self.is_transformer and hasattr(
+            policy, "kv_cached_step"
+        )
+        self.kv_cache: TransformerKVCacheManager | None = None
+        if self.use_kv_cache:
+            gpt2_cfg = getattr(self.policy, "transformer", None)
+            if gpt2_cfg is None or not hasattr(gpt2_cfg, "config"):
+                # The policy says it's a transformer but we can't introspect GPT2 dims; fall back.
+                self.use_kv_cache = False
+            else:
+                cfg = gpt2_cfg.config
+                num_layers = int(cfg.n_layer)
+                n_heads = int(cfg.n_head)
+                head_dim = int(cfg.n_embd) // n_heads
+                if kv_cache_max_seq_len is None:
+                    kv_cache_max_seq_len = int(getattr(cfg, "n_positions", 1024))
+                # Use the model's actual parameter dtype as the compute dtype so the
+                # cache contents match what the transformer expects on forward.
+                try:
+                    compute_dtype = next(self.policy.transformer.parameters()).dtype
+                except StopIteration:
+                    compute_dtype = torch.float32
+                self.kv_cache = TransformerKVCacheManager(
+                    num_envs=num_envs,
+                    num_layers=num_layers,
+                    n_heads=n_heads,
+                    head_dim=head_dim,
+                    max_seq_len=int(kv_cache_max_seq_len),
+                    device=device,
+                    storage_dtype=kv_cache_storage_dtype,
+                    compute_dtype=compute_dtype,
+                )
+                cache_bytes = (
+                    2  # keys + values
+                    * num_envs * num_layers * n_heads * int(kv_cache_max_seq_len) * head_dim
+                    * torch.finfo(kv_cache_storage_dtype).bits // 8
+                )
+                print(
+                    f"[DiffusionPolicyWrapper] KV cache enabled "
+                    f"(layers={num_layers}, heads={n_heads}, head_dim={head_dim}, "
+                    f"max_seq_len={kv_cache_max_seq_len}, num_envs={num_envs}, "
+                    f"storage_dtype={kv_cache_storage_dtype}, compute_dtype={compute_dtype}, "
+                    f"approx_mem={cache_bytes / 1e9:.2f}GB)",
+                    flush=True,
+                )
+        else:
+            if self.is_transformer:
+                print(
+                    "[DiffusionPolicyWrapper] KV cache disabled — re-encoding full trajectory each step.",
+                    flush=True,
+                )
+
         self.action_queue = [[] for _ in range(num_envs)]
+
+        profile_enabled = os.environ.get("DIFFUSION_POLICY_PROFILE", "0") not in ("", "0", "false", "False")
+        self._profile = _ProfileAccumulator(
+            name=profile_name,
+            enabled=profile_enabled,
+            print_every_calls=int(os.environ.get("DIFFUSION_POLICY_PROFILE_EVERY", "50")),
+            device=device,
+        )
 
         self.policy.reset()
 
@@ -228,6 +565,8 @@ class DiffusionPolicyWrapper:
         if isinstance(reset_indices, torch.Tensor):
             reset_indices = reset_indices.tolist()
         self.obs_history_manager.reset_envs(reset_indices)
+        if self.kv_cache is not None:
+            self.kv_cache.reset(reset_indices)
         self.policy.reset()
 
     def predict_action(self, obs_dict: dict[str, Any], env_indices: list[int] | None = None) -> torch.Tensor:
@@ -246,6 +585,13 @@ class DiffusionPolicyWrapper:
             Action tensor with shape (len(env_indices), action_dim) for the transformer path, or
             (num_envs, action_dim) otherwise.
         """
+        # Fast path: KV-cached incremental inference for transformer policies.
+        if self.is_transformer and self.use_kv_cache and self.kv_cache is not None:
+            if env_indices is None:
+                env_indices = list(range(self.num_envs))
+            processed_obs = self._process_obs(obs_dict)
+            return self._predict_action_kv_cached(processed_obs, env_indices)
+
         processed_obs = self._process_obs(obs_dict)
 
         if self.is_transformer:
@@ -257,10 +603,13 @@ class DiffusionPolicyWrapper:
             self.obs_history_manager.update(processed_obs)
             need_new_actions = [i for i in range(self.num_envs) if len(self.action_queue[i]) == 0]
 
+        self._profile.step_start(len(env_indices) if self.is_transformer else self.num_envs)
         if need_new_actions:
-            new_actions = self._get_action_chunks(need_new_actions)
+            with self._profile.time_block("legacy_full_seq"):
+                new_actions = self._get_action_chunks(need_new_actions)
             for idx, env_idx in enumerate(need_new_actions):
                 self.action_queue[env_idx].extend(new_actions[idx])
+        self._profile.maybe_print()
 
         if self.is_transformer:
             actions = torch.zeros(
@@ -275,6 +624,59 @@ class DiffusionPolicyWrapper:
             actions[i] = self.action_queue[i].pop(0)
 
         return actions
+
+    def _predict_action_kv_cached(
+        self, processed_obs: dict[str, torch.Tensor], env_indices: list[int]
+    ) -> torch.Tensor:
+        """Mini-batched KV-cached inference.
+
+        This wrapper is deliberately token-structure agnostic: it only gathers each env's
+        padded past KVs, forwards them to ``policy.kv_cached_step``, then appends however
+        many new tokens the policy says it added (via ``result["num_new_tokens"]``) into
+        per-env storage. Attention mask and position-id construction lives inside the
+        policy so that subclasses can change the token structure (e.g. interleaved
+        obs+action tokens, separator tokens, multi-token fusion) without any edits here.
+        """
+        assert self.kv_cache is not None
+        self._profile.step_start(len(env_indices))
+        B_total = len(env_indices)
+        mini_batch_size = self.mini_batch_size
+        out_actions: list[torch.Tensor] = []
+
+        for start in range(0, B_total, mini_batch_size):
+            end = min(start + mini_batch_size, B_total)
+            chunk_ids = env_indices[start:end]
+
+            # Per-env slice; leave the "what this step's inputs mean" question to the
+            # policy's ``_embed_new_step``.
+            chunk_inputs: dict[str, torch.Tensor] = {
+                key: value[start:end] for key, value in processed_obs.items()
+            }
+
+            with self._profile.time_block("kv_gather"):
+                past_kvs, past_lengths, max_past = self.kv_cache.gather(chunk_ids)
+
+            with self._profile.time_block("kv_forward"), torch.no_grad():
+                result = self.policy.kv_cached_step(
+                    chunk_inputs,
+                    past_key_values=past_kvs,
+                    past_lengths=past_lengths,
+                    max_past=max_past,
+                )
+
+            num_new_tokens = int(result.get("num_new_tokens", 1))
+            with self._profile.time_block("kv_append"):
+                self.kv_cache.append(
+                    chunk_ids,
+                    result["past_key_values"],
+                    past_lengths,
+                    num_new_tokens=num_new_tokens,
+                )
+
+            out_actions.append(result["action"].to(torch.float32))
+
+        self._profile.maybe_print()
+        return torch.cat(out_actions, dim=0)
 
     def _process_obs(self, obs_dict: dict[str, Any]) -> dict[str, torch.Tensor]:
         """Convert Isaac Lab observations to format expected by diffusion policy."""
@@ -321,7 +723,7 @@ class DiffusionPolicyWrapper:
 
     def _get_action_chunks(self, env_indices: list[int]) -> list[torch.Tensor]:
         """Get action chunks for specific environments, mini-batched to bound transformer memory."""
-        mini_batch_size = 8
+        mini_batch_size = self.mini_batch_size
         mini_batch_actions = []
         for start in range(0, len(env_indices), mini_batch_size):
             end = start + mini_batch_size

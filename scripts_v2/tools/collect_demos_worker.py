@@ -69,6 +69,35 @@ parser.add_argument(
     ),
 )
 parser.add_argument("--seed", type=int, default=0, help="Base random seed for the env.")
+parser.add_argument(
+    "--transformer_mini_batch_size",
+    type=int,
+    default=64,
+    help=(
+        "Mini-batch size used by DiffusionPolicyWrapper when serializing transformer inference"
+        " across envs. Bounds peak activation memory; too-small values (e.g. 8) dominate wall"
+        " time for large num_envs."
+    ),
+)
+parser.add_argument(
+    "--no_kv_cache",
+    action="store_true",
+    default=False,
+    help=(
+        "Disable the incremental KV-cached inference path inside DiffusionPolicyWrapper"
+        " (falls back to re-encoding the full trajectory each step). Useful for A/B"
+        " profiling; normally you want KV caching on."
+    ),
+)
+parser.add_argument(
+    "--kv_cache_max_seq_len",
+    type=int,
+    default=None,
+    help=(
+        "Upper bound on per-env KV cache length. Defaults to the transformer's n_positions"
+        " (typically 1024). Lower it to reduce preallocated cache memory."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -185,7 +214,14 @@ def record_pre_reset(self, env_ids: Sequence[int] | None, force_export_or_skip=N
         self.export_episodes(env_ids)
 
 
-def load_exploration_policy(checkpoint_path: str, device: torch.device, num_envs: int) -> DiffusionPolicyWrapper:
+def load_exploration_policy(
+    checkpoint_path: str,
+    device: torch.device,
+    num_envs: int,
+    mini_batch_size: int = 64,
+    use_kv_cache: bool = True,
+    kv_cache_max_seq_len: int | None = None,
+) -> DiffusionPolicyWrapper:
     with open(checkpoint_path, "rb") as f:
         payload = torch.load(f, pickle_module=dill)
 
@@ -197,7 +233,16 @@ def load_exploration_policy(checkpoint_path: str, device: torch.device, num_envs
 
     policy: BaseImagePolicy = workspace.ema_model if cfg.training.use_ema else workspace.model
     policy = policy.eval().to(device)
-    return DiffusionPolicyWrapper(policy, device, n_obs_steps=policy.n_obs_steps, num_envs=num_envs)
+    return DiffusionPolicyWrapper(
+        policy,
+        device,
+        n_obs_steps=policy.n_obs_steps,
+        num_envs=num_envs,
+        mini_batch_size=mini_batch_size,
+        use_kv_cache=use_kv_cache,
+        kv_cache_max_seq_len=kv_cache_max_seq_len,
+        profile_name="exploration",
+    )
 
 
 def sample_exploration_horizons(
@@ -227,6 +272,9 @@ class CollectionSession:
         max_episode_length: int,
         deterministic: bool,
         apply_exploration_ratio_filter: bool = False,
+        transformer_mini_batch_size: int = 64,
+        use_kv_cache: bool = True,
+        kv_cache_max_seq_len: int | None = None,
     ):
         self.env = env
         self.env_cfg = env_cfg
@@ -235,6 +283,9 @@ class CollectionSession:
         self.max_episode_length = max_episode_length
         self.deterministic = deterministic
         self.apply_exploration_ratio_filter = apply_exploration_ratio_filter
+        self.transformer_mini_batch_size = transformer_mini_batch_size
+        self.use_kv_cache = use_kv_cache
+        self.kv_cache_max_seq_len = kv_cache_max_seq_len
 
         bc = agent_cfg.algorithm.offline_algorithm_cfg.behavior_cloning_cfg
         assert len(bc.experts_path) == 1, "Only one expert is supported for now."
@@ -277,7 +328,14 @@ class CollectionSession:
             policy = self._exploration_cache[checkpoint_path]
         else:
             print(f"[worker] loading exploration checkpoint: {checkpoint_path}", flush=True)
-            policy = load_exploration_policy(checkpoint_path, self.device, self.env.num_envs)
+            policy = load_exploration_policy(
+                checkpoint_path,
+                self.device,
+                self.env.num_envs,
+                mini_batch_size=self.transformer_mini_batch_size,
+                use_kv_cache=self.use_kv_cache,
+                kv_cache_max_seq_len=self.kv_cache_max_seq_len,
+            )
             self._exploration_cache[checkpoint_path] = policy
         reset_ids = torch.arange(self.env.num_envs, device=self.device)
         policy.reset(reset_ids)
@@ -519,6 +577,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
         max_episode_length=max_episode_length,
         deterministic=args_cli.deterministic,
         apply_exploration_ratio_filter=args_cli.enable_exploration_ratio_filter,
+        transformer_mini_batch_size=args_cli.transformer_mini_batch_size,
+        use_kv_cache=not args_cli.no_kv_cache,
+        kv_cache_max_seq_len=args_cli.kv_cache_max_seq_len,
+    )
+    print(
+        f"[worker] KV cache {'ENABLED' if not args_cli.no_kv_cache else 'DISABLED'} "
+        f"(max_seq_len={args_cli.kv_cache_max_seq_len})",
+        flush=True,
     )
     print(f"[worker] CollectionSession ready in {time.time() - _t0:.1f}s", flush=True)
     if args_cli.enable_exploration_ratio_filter:
