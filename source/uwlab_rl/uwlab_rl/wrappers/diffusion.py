@@ -471,6 +471,7 @@ class DiffusionPolicyWrapper:
             obs_keys = policy.obs_encoder.keys
         else:
             obs_keys = policy.obs_encoder.rgb_keys + policy.obs_encoder.low_dim_keys
+        self._policy_obs_keys = list(obs_keys)
         if self.is_transformer:
             self.obs_history_manager = ImageObservationSequence(num_envs, obs_keys, n_obs_steps, device)
         elif self.is_image_policy:
@@ -643,14 +644,24 @@ class DiffusionPolicyWrapper:
         mini_batch_size = self.mini_batch_size
         out_actions: list[torch.Tensor] = []
 
+        allowed_keys = set(self._policy_obs_keys)
+        if getattr(self.policy, "include_action_in_context", False):
+            allowed_keys.add("action")
+        if getattr(self.policy, "include_reward_in_context", False):
+            allowed_keys.add("reward")
+
         for start in range(0, B_total, mini_batch_size):
             end = min(start + mini_batch_size, B_total)
             chunk_ids = env_indices[start:end]
 
-            # Per-env slice; leave the "what this step's inputs mean" question to the
-            # policy's ``_embed_new_step``.
+            # Per-env slice, filtered to the keys the policy's encoder / normalizer know about.
+            # The raw Isaac Lab obs dict contains extra fields (e.g. ``joint_vel``) that the
+            # legacy path strips implicitly via ``obs_history_manager``; mirror that here so
+            # ``_embed_new_step``'s normalizer lookup stays in-vocabulary.
             chunk_inputs: dict[str, torch.Tensor] = {
-                key: value[start:end] for key, value in processed_obs.items()
+                key: value[start:end]
+                for key, value in processed_obs.items()
+                if key in allowed_keys
             }
 
             with self._profile.time_block("kv_gather"):

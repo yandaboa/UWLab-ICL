@@ -146,7 +146,8 @@ class CollectionWorker:
         gpu_id: int,
         seed: int,
         no_video: bool,
-        enable_exploration_ratio_filter: bool = False,
+        disable_exploration_ratio_filter: bool = False,
+        disable_task_success_filter: bool = False,
         transformer_mini_batch_size: int = 64,
         use_kv_cache: bool = True,
         kv_cache_max_seq_len: int | None = None,
@@ -197,8 +198,15 @@ class CollectionWorker:
             cmd.append(f"env.scene.receptive_object={receptive_object}")
         if not no_video:
             cmd.append("--enable_cameras")
-        if enable_exploration_ratio_filter:
-            cmd.append("--enable_exploration_ratio_filter")
+        if disable_exploration_ratio_filter:
+            cmd.append("--disable_exploration_ratio_filter")
+        if disable_task_success_filter:
+            assert not disable_exploration_ratio_filter, (
+                "--disable_task_success_filter requires the exploration-ratio filter to stay ON"
+                " (i.e., do NOT pass --disable_exploration_ratio_filter). Otherwise every episode"
+                " would be admitted with no quality gate."
+            )
+            cmd.append("--disable_task_success_filter")
         if not use_kv_cache:
             cmd.append("--no_kv_cache")
         if kv_cache_max_seq_len is not None:
@@ -556,11 +564,23 @@ def main() -> None:
         help="If set, skip evaluation between iterations (useful for faster iteration).",
     )
     parser.add_argument(
-        "--enable_exploration_ratio_filter",
+        "--disable_exploration_ratio_filter",
         action="store_true",
         help=(
-            "If set, enable the filter that rejects demos where the learner drove >=95%% of the"
-            " successful episode. Off by default; some tasks want this gate, most don't."
+            "If set, disable the filter that rejects demos where the learner drove >=95%% of the"
+            " successful episode. ON by default; pass this flag only for tasks where you want to"
+            " keep learner-dominated demos (e.g. pure imitation from the exploration policy)."
+        ),
+    )
+    parser.add_argument(
+        "--disable_task_success_filter",
+        action="store_true",
+        help=(
+            "If set, admit every completed episode (success or not) as long as it passes the"
+            " exploration-ratio filter. Requires the exploration-ratio filter to remain ON — i.e."
+            " you MUST NOT also pass --disable_exploration_ratio_filter (an assert enforces this)."
+            " Useful when the exploration policy produces good trajectories that the task's success"
+            " termination does not capture."
         ),
     )
     parser.add_argument(
@@ -601,6 +621,13 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+
+    if args.disable_task_success_filter:
+        assert not args.disable_exploration_ratio_filter, (
+            "--disable_task_success_filter requires the exploration-ratio filter to stay ON."
+            " Remove --disable_exploration_ratio_filter, or drop --disable_task_success_filter."
+            " Otherwise no quality filter remains and every episode would be admitted."
+        )
 
     sampling_ratio_curriculum = [
         (1.0,),
@@ -666,7 +693,8 @@ def main() -> None:
         gpu_id=args.data_gpu,
         seed=args.seed,
         no_video=args.no_video,
-        enable_exploration_ratio_filter=args.enable_exploration_ratio_filter,
+        disable_exploration_ratio_filter=args.disable_exploration_ratio_filter,
+        disable_task_success_filter=args.disable_task_success_filter,
         transformer_mini_batch_size=args.transformer_mini_batch_size,
         use_kv_cache=not args.no_kv_cache,
         kv_cache_max_seq_len=args.kv_cache_max_seq_len,

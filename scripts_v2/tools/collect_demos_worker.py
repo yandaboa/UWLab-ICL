@@ -31,6 +31,7 @@ import numba  # noqa: F401
 import argparse
 import contextlib
 import gymnasium as gym
+import math
 import os
 import time
 import traceback
@@ -60,12 +61,25 @@ parser.add_argument(
     help="Use the mean of the expert policy distribution instead of sampling.",
 )
 parser.add_argument(
-    "--enable_exploration_ratio_filter",
+    "--disable_exploration_ratio_filter",
     action="store_true",
     default=False,
     help=(
-        "If set, enable the check that rejects demos where the learner/exploration policy drove more"
-        " than 95%% of the episode. Off by default; some tasks want this gate, most don't."
+        "If set, disable the check that rejects demos where the learner/exploration policy drove"
+        " more than 95%% of the episode. ON by default; pass this flag only for tasks where you"
+        " want to keep learner-dominated demos (e.g. pure imitation from the exploration policy)."
+    ),
+)
+parser.add_argument(
+    "--disable_task_success_filter",
+    action="store_true",
+    default=False,
+    help=(
+        "If set, admit every completed episode (regardless of the task-defined `success`"
+        " termination) as long as it passes the exploration-ratio filter. Useful when the"
+        " exploration policy itself produces good trajectories that the task success condition"
+        " might miss. REQUIRES --disable_exploration_ratio_filter to NOT be set, otherwise there"
+        " is no filter left and we'd admit literally every episode; an assert enforces this."
     ),
 )
 parser.add_argument("--seed", type=int, default=0, help="Base random seed for the env.")
@@ -127,6 +141,12 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper  # noq
 from uwlab.utils.datasets import ZarrDatasetFileHandler  # noqa: E402
 
 import uwlab_tasks  # noqa: F401, E402
+from collect_demos_logging import CollectionProgressLogger, log_swap_recorder  # noqa: E402
+
+# Key written by the task's curriculum/success-monitor events into ``env.extras["log"]``.
+# Same signal the curriculum thresholds off of (see
+# ``uwlab_tasks.manager_based.manipulation.omnireset.mdp.events`` — ``curriculum_success_log_key``).
+SUCCESS_RATE_LOG_KEY = "Metrics/task_command/end_of_episode_success_rate"
 from uwlab_rl.wrappers.diffusion import DiffusionPolicyWrapper  # noqa: E402
 from uwlab_tasks.manager_based.manipulation.omnireset.mdp.recorders.recorders_cfg import (  # noqa: E402
     ActionStateRecorderManagerTransformedActionCfg,
@@ -198,15 +218,63 @@ def record_pre_reset(self, env_ids: Sequence[int] | None, force_export_or_skip=N
         key, value = term.record_pre_reset(env_ids)
         self.add_to_episodes(key, value, env_ids)
 
-    success_results = torch.zeros(len(env_ids), dtype=bool, device=self._env.device)
-    if hasattr(self._env, "termination_manager") and "success" in self._env.termination_manager.active_terms:
-        success_results |= self._env.termination_manager.get_term("success")[env_ids]
+    # Raw signals are computed regardless of which filters are enabled so the
+    # 2x2 task_success × ratio_pass cause table reflects what *each* gate would
+    # have done. Admission still honors the enabled-filter flags.
+    device = self._env.device
+    n = len(env_ids)
 
-    if hasattr(self, "exploration_lengths") and getattr(self, "apply_exploration_ratio_filter", False):
-        episode_lengths = self._env.episode_length_buf[env_ids]
+    task_success = torch.zeros(n, dtype=bool, device=device)
+    if hasattr(self._env, "termination_manager") and "success" in self._env.termination_manager.active_terms:
+        task_success |= self._env.termination_manager.get_term("success")[env_ids]
+
+    episode_lengths = self._env.episode_length_buf[env_ids]
+    ratio_pass = torch.ones(n, dtype=bool, device=device)
+    if hasattr(self, "exploration_lengths"):
         exploration_lengths = self.exploration_lengths[env_ids]
         exploration_ratios = exploration_lengths / torch.clamp(episode_lengths, min=1)
-        success_results = success_results & (exploration_ratios < 0.95)
+        ratio_pass = exploration_ratios < 0.95
+
+    task_gate = (
+        torch.ones(n, dtype=bool, device=device)
+        if getattr(self, "disable_task_success_filter", False)
+        else task_success
+    )
+    ratio_gate = (
+        ratio_pass
+        if getattr(self, "apply_exploration_ratio_filter", False)
+        else torch.ones(n, dtype=bool, device=device)
+    )
+    success_results = task_gate & ratio_gate
+
+    stats = getattr(self, "_filter_stats", None)
+    if stats is not None:
+        stats["ts_pass_ratio_pass"] += int((task_success & ratio_pass).sum().item())
+        stats["ts_pass_ratio_fail"] += int((task_success & ~ratio_pass).sum().item())
+        stats["ts_fail_ratio_pass"] += int((~task_success & ratio_pass).sum().item())
+        stats["ts_fail_ratio_fail"] += int((~task_success & ~ratio_pass).sum().item())
+        stats["total_resets"] += n
+        stats["admitted"] += int(success_results.sum().item())
+
+        # Per-termination-term firing counts and mean episode length at reset.
+        # Terms are not mutually exclusive (e.g. both ``success`` and ``time_out``
+        # can fire on the same step), so sums don't have to equal ``total_resets``.
+        if hasattr(self._env, "termination_manager"):
+            tm = self._env.termination_manager
+            term_counts = stats.setdefault("term_counts", {})
+            term_step_sums = stats.setdefault("term_step_sums", {})
+            for term_name in tm.active_terms:
+                term_mask = tm.get_term(term_name)[env_ids]
+                if term_mask.any():
+                    term_counts[term_name] = term_counts.get(term_name, 0) + int(term_mask.sum().item())
+                    term_step_sums[term_name] = term_step_sums.get(term_name, 0) + int(
+                        episode_lengths[term_mask].sum().item()
+                    )
+
+        if success_results.any():
+            stats["admitted_step_sum"] = stats.get("admitted_step_sum", 0) + int(
+                episode_lengths[success_results].sum().item()
+            )
 
     self.set_success_to_episodes(env_ids, success_results)
 
@@ -271,11 +339,18 @@ class CollectionSession:
         device,
         max_episode_length: int,
         deterministic: bool,
-        apply_exploration_ratio_filter: bool = False,
+        apply_exploration_ratio_filter: bool = True,
+        disable_task_success_filter: bool = False,
         transformer_mini_batch_size: int = 64,
         use_kv_cache: bool = True,
         kv_cache_max_seq_len: int | None = None,
     ):
+        assert not (disable_task_success_filter and not apply_exploration_ratio_filter), (
+            "disable_task_success_filter=True requires apply_exploration_ratio_filter=True."
+            " Otherwise every completed episode would be admitted unfiltered — refusing to"
+            " produce a dataset with no quality gate."
+        )
+
         self.env = env
         self.env_cfg = env_cfg
         self.agent_cfg = agent_cfg
@@ -283,6 +358,7 @@ class CollectionSession:
         self.max_episode_length = max_episode_length
         self.deterministic = deterministic
         self.apply_exploration_ratio_filter = apply_exploration_ratio_filter
+        self.disable_task_success_filter = disable_task_success_filter
         self.transformer_mini_batch_size = transformer_mini_batch_size
         self.use_kv_cache = use_kv_cache
         self.kv_cache_max_seq_len = kv_cache_max_seq_len
@@ -316,6 +392,11 @@ class CollectionSession:
         # exploration_lengths is absent on the recorder).
         recorder_manager.record_pre_reset = MethodType(record_pre_reset, recorder_manager)
         recorder_manager.apply_exploration_ratio_filter = apply_exploration_ratio_filter
+        recorder_manager.disable_task_success_filter = disable_task_success_filter
+
+        # Job counter so logs clearly distinguish iteration-1 / iteration-2 / ...
+        # collections (useful for diagnosing per-iteration slowdowns).
+        self.job_counter = 0
 
     def _get_exploration_policy(self, checkpoint_path: str | None) -> DiffusionPolicyWrapper | None:
         if checkpoint_path is None:
@@ -349,6 +430,7 @@ class CollectionSession:
         Also clears per-env success counters and episode buffers so counts are
         scoped to the new job.
         """
+        _t0 = time.time()
         rm = self.recorder_manager
         # Close previous dataset file handler if any.
         if getattr(rm, "_dataset_file_handler", None) is not None:
@@ -374,9 +456,21 @@ class CollectionSession:
         # Reset counters/buffers.
         rm._exported_successful_episode_count = {}
         rm._exported_failed_episode_count = {}
+        rm._filter_stats = {
+            "ts_pass_ratio_pass": 0,
+            "ts_pass_ratio_fail": 0,
+            "ts_fail_ratio_pass": 0,
+            "ts_fail_ratio_fail": 0,
+            "total_resets": 0,
+            "admitted": 0,
+            "admitted_step_sum": 0,
+            "term_counts": {},
+            "term_step_sums": {},
+        }
         from isaaclab.managers.recorder_manager import EpisodeData  # local import to avoid top-level dep
         for env_id in range(self.env.num_envs):
             rm._episodes[env_id] = EpisodeData()
+        log_swap_recorder(dataset_file, time.time() - _t0)
 
     def collect(
         self,
@@ -393,12 +487,18 @@ class CollectionSession:
         num_envs = env.num_envs
         device = self.device
 
+        self.job_counter += 1
+        job_num = self.job_counter
+
         # Reconfigure recorder output for this job.
         self._swap_recorder_output(dataset_file)
 
-        # Per-job episode length (steps).
-        step_dt = self.env_cfg.sim.dt * self.env_cfg.sim.render_interval
-        episode_length_steps = int(episode_length_s / step_dt)
+        # Per-job episode length (steps). Source: Isaac Lab's
+        # ``ManagerBasedEnv.step_dt = sim.dt * decimation`` — use the live env
+        # as the source of truth. (render_interval only gates the renderer
+        # inside the decimation loop and must NOT be used here.)
+        step_dt = env.unwrapped.step_dt
+        episode_length_steps = math.ceil(episode_length_s / step_dt)
         if episode_length_steps > self.max_episode_length:
             raise RuntimeError(
                 f"Requested episode_length_s={episode_length_s} (→{episode_length_steps} steps) exceeds worker max"
@@ -408,8 +508,24 @@ class CollectionSession:
         max_exploration_horizon_steps = int(max_exploration_horizon * episode_length_steps)
         min_exploration_horizon_steps = int(min_exploration_horizon * episode_length_steps)
 
-        # Resolve exploration policy (cache-aware).
+        logger = CollectionProgressLogger(
+            job_num=job_num,
+            num_envs=num_envs,
+            num_demos=num_demos,
+            episode_length_s=episode_length_s,
+            episode_length_steps=episode_length_steps,
+            step_dt=step_dt,
+            dataset_file=dataset_file,
+            min_exploration_horizon=min_exploration_horizon,
+            max_exploration_horizon=max_exploration_horizon,
+            min_exploration_horizon_steps=min_exploration_horizon_steps,
+            max_exploration_horizon_steps=max_exploration_horizon_steps,
+        )
+        logger.log_start()
+
+        _t0 = time.time()
         exploration_policy = self._get_exploration_policy(exploration_checkpoint)
+        logger.log_event("exploration policy ready", time.time() - _t0, extra=f"(ckpt={exploration_checkpoint})")
 
         # Reset exploration bookkeeping.
         exploration_horizons = sample_exploration_horizons(
@@ -419,7 +535,6 @@ class CollectionSession:
         self.recorder_manager.exploration_lengths = exploration_lengths
 
         current_recorded_demo_count = 0
-        start_time = time.time()
         deterministic = self.deterministic
 
         # NOTE: env.reset() must run inside inference_mode. After the first rollout,
@@ -429,37 +544,47 @@ class CollectionSession:
         # for the same reason; we extend the context to cover the per-job reset here.
         with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
             # Reset all envs to make sure the recorder starts cleanly for this job.
+            _t_reset0 = time.time()
             env.reset()
             if exploration_policy is not None:
                 exploration_policy.reset(torch.arange(num_envs, device=device))
+            logger.log_event("initial env.reset()", time.time() - _t_reset0)
 
-            pbar = tqdm(total=num_demos, desc=f"Recording demos → {os.path.basename(dataset_file)}", unit="demo")
+            pbar = tqdm(
+                total=num_demos,
+                desc=f"job#{job_num} → {os.path.basename(dataset_file)}",
+                unit="demo",
+                dynamic_ncols=True,
+            )
+            logger.on_loop_start()
 
             while True:
-                # Choose expert vs exploration per-env based on per-env horizon.
-                episode_steps = env.unwrapped.episode_length_buf
-                use_exploration = (episode_steps < exploration_horizons) & (exploration_policy is not None)
-                use_expert = ~use_exploration
-                exploration_lengths += use_exploration.int()
-                self.recorder_manager.exploration_lengths = exploration_lengths
+                with logger.timed("expert"):
+                    episode_steps = env.unwrapped.episode_length_buf
+                    use_exploration = (episode_steps < exploration_horizons) & (exploration_policy is not None)
+                    use_expert = ~use_exploration
+                    exploration_lengths += use_exploration.int()
+                    self.recorder_manager.exploration_lengths = exploration_lengths
 
-                expert_policy_obs = self.expert_obs_fn(env)
-                mean, std = self.expert_policy.compute_distribution(expert_policy_obs)
-                actions = torch.zeros((num_envs, env.action_space.shape[-1]), device=device)
-                if use_expert.any():
-                    expert_actions = mean if deterministic else torch.normal(mean, std)
-                    actions[use_expert] = expert_actions[use_expert]
-                if use_exploration.any() and exploration_policy is not None:
-                    # Match OctiLab collect_demos.py convention: only feed obs for envs actually
-                    # running exploration (so transformer per-env trajectories grow only on those
-                    # steps) and pass their absolute env ids alongside.
-                    exploration_env_ids = use_exploration.nonzero(as_tuple=False).reshape(-1)
-                    obs_dict = env.unwrapped.obs_buf
-                    policy_obs = obs_dict.get("policy", obs_dict) if isinstance(obs_dict, dict) else obs_dict
-                    exploration_obs = {k: v[use_exploration] for k, v in policy_obs.items()}
-                    exploration_actions = exploration_policy.predict_action(exploration_obs, exploration_env_ids)
-                    exploration_actions = exploration_actions.to(device)
-                    actions[use_exploration] = exploration_actions
+                    expert_policy_obs = self.expert_obs_fn(env)
+                    mean, std = self.expert_policy.compute_distribution(expert_policy_obs)
+                    actions = torch.zeros((num_envs, env.action_space.shape[-1]), device=device)
+                    if use_expert.any():
+                        expert_actions = mean if deterministic else torch.normal(mean, std)
+                        actions[use_expert] = expert_actions[use_expert]
+
+                with logger.timed("explore"):
+                    if use_exploration.any() and exploration_policy is not None:
+                        # Match OctiLab collect_demos.py convention: only feed obs for envs actually
+                        # running exploration (so transformer per-env trajectories grow only on those
+                        # steps) and pass their absolute env ids alongside.
+                        exploration_env_ids = use_exploration.nonzero(as_tuple=False).reshape(-1)
+                        obs_dict = env.unwrapped.obs_buf
+                        policy_obs = obs_dict.get("policy", obs_dict) if isinstance(obs_dict, dict) else obs_dict
+                        exploration_obs = {k: v[use_exploration] for k, v in policy_obs.items()}
+                        exploration_actions = exploration_policy.predict_action(exploration_obs, exploration_env_ids)
+                        exploration_actions = exploration_actions.to(device)
+                        actions[use_exploration] = exploration_actions
 
                 # Zero actions on the first step after a reset (first image may not be valid).
                 first_step_mask = env.unwrapped.episode_length_buf == 0
@@ -474,35 +599,64 @@ class CollectionSession:
                 env.unwrapped.obs_buf["data_collection"]["expert_action_mean"] = mean.clone()
                 env.unwrapped.obs_buf["data_collection"]["expert_action_std"] = std.clone()
 
-                env.step(actions)
+                with logger.timed("step"):
+                    env.step(actions)
 
-                # Compose natural resets (from env.step) with manual per-job truncation.
-                natural_reset = env.unwrapped.reset_buf.clone().bool()
-                too_long = env.unwrapped.episode_length_buf >= episode_length_steps
-                manual_truncate = too_long & ~natural_reset
-                if manual_truncate.any():
-                    truncate_ids = manual_truncate.nonzero(as_tuple=False).reshape(-1)
-                    # Mirror the sequence that env.step() uses internally for resets so the
-                    # recorder writes the episode out properly.
-                    env.unwrapped.recorder_manager.record_pre_reset(truncate_ids)
-                    env.unwrapped._reset_idx(truncate_ids)
-                    env.unwrapped.recorder_manager.record_post_reset(truncate_ids)
+                with logger.timed("reset"):
+                    natural_reset = env.unwrapped.reset_buf.clone().bool()
+                    too_long = env.unwrapped.episode_length_buf >= episode_length_steps
+                    manual_truncate = too_long & ~natural_reset
+                    if manual_truncate.any():
+                        truncate_ids = manual_truncate.nonzero(as_tuple=False).reshape(-1)
+                        # Mirror the sequence that env.step() uses internally for resets so the
+                        # recorder writes the episode out properly.
+                        env.unwrapped.recorder_manager.record_pre_reset(truncate_ids)
+                        env.unwrapped._reset_idx(truncate_ids)
+                        env.unwrapped.recorder_manager.record_post_reset(truncate_ids)
 
-                all_reset = natural_reset | manual_truncate
-                if all_reset.any():
-                    reset_ids = all_reset.nonzero(as_tuple=False).reshape(-1)
-                    exploration_horizons[reset_ids] = sample_exploration_horizons(
-                        len(reset_ids), min_exploration_horizon_steps, max_exploration_horizon_steps, device
-                    )
-                    exploration_lengths[reset_ids] = 0
-                    if exploration_policy is not None:
-                        exploration_policy.reset(reset_ids)
+                    all_reset = natural_reset | manual_truncate
+                    if all_reset.any():
+                        reset_ids = all_reset.nonzero(as_tuple=False).reshape(-1)
+                        exploration_horizons[reset_ids] = sample_exploration_horizons(
+                            len(reset_ids), min_exploration_horizon_steps, max_exploration_horizon_steps, device
+                        )
+                        exploration_lengths[reset_ids] = 0
+                        if exploration_policy is not None:
+                            exploration_policy.reset(reset_ids)
 
                 new_count = self.recorder_manager.exported_successful_episode_count
                 if new_count > current_recorded_demo_count:
                     increment = new_count - current_recorded_demo_count
                     current_recorded_demo_count = new_count
                     pbar.update(increment)
+
+                # extras["log"] is only rewritten inside _reset_idx, so only trust it on
+                # iters where something actually reset; otherwise pass None (stale).
+                success_rate: float | None = None
+                if bool(all_reset.any()):
+                    extras = getattr(env.unwrapped, "extras", None)
+                    log_dict = extras.get("log") if isinstance(extras, dict) else None
+                    sr = log_dict.get(SUCCESS_RATE_LOG_KEY) if isinstance(log_dict, dict) else None
+                    if hasattr(sr, "item"):
+                        sr = sr.item()
+                    if sr is not None:
+                        success_rate = float(sr)
+
+                n_expert = int(use_expert.sum().item())
+                n_explore = int(use_exploration.sum().item())
+                raw_fs = getattr(self.recorder_manager, "_filter_stats", {}) or {}
+                filter_stats = {
+                    k: (dict(v) if isinstance(v, dict) else v) for k, v in raw_fs.items()
+                }
+
+                logger.on_iter_end(
+                    current_recorded_demo_count,
+                    pbar=pbar,
+                    success_rate=success_rate,
+                    expert_count=n_expert,
+                    explore_count=n_explore,
+                    filter_stats=filter_stats,
+                )
 
                 if num_demos > 0 and new_count >= num_demos:
                     break
@@ -516,11 +670,15 @@ class CollectionSession:
         assert self.recorder_manager._dataset_file_handler is not None, "Dataset file handler is not set."
         self.recorder_manager._dataset_file_handler.flush()
 
-        elapsed = time.time() - start_time
+        per_env_exports = {
+            env_id: int(self.recorder_manager._exported_successful_episode_count.get(env_id, 0))
+            for env_id in range(num_envs)
+        }
+        metrics = logger.log_end(current_recorded_demo_count, per_env_exports=per_env_exports)
         return {
             "demos_recorded": int(current_recorded_demo_count),
-            "elapsed_s": elapsed,
             "dataset_file": dataset_file,
+            **metrics,
         }
 
 
@@ -556,15 +714,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
 
     agent_cfg = process_agent_cfg(env_cfg, agent_cfg)
 
-    step_dt = env_cfg.sim.dt * env_cfg.sim.render_interval
-    max_episode_length = int(env_cfg.episode_length_s / step_dt)
-
     print("[worker] building gym env...", flush=True)
     _t0 = time.time()
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
     print(f"[worker] gym.make done in {time.time() - _t0:.1f}s", flush=True)
     env = RslRlVecEnvWrapper(env)
     print("[worker] RslRlVecEnvWrapper done", flush=True)
+
+    # Source of truth for timing is the live env, matching Isaac Lab's
+    # ``ManagerBasedEnv.step_dt = sim.dt * decimation`` and
+    # ``max_episode_length = ceil(episode_length_s / step_dt)``. The previous
+    # formula used ``sim.render_interval`` which has nothing to do with env
+    # step rate (it only controls how often the renderer ticks inside the
+    # decimation loop), and silently produced ~12x inflated step counts when
+    # ``decimation != render_interval`` (the typical case).
+    step_dt = env.unwrapped.step_dt
+    max_episode_length = int(env.unwrapped.max_episode_length)
+    print(
+        f"[worker] env timing: sim.dt={env_cfg.sim.dt:.5f} decimation={env_cfg.decimation} "
+        f"render_interval={env_cfg.sim.render_interval} → step_dt={step_dt:.5f}s, "
+        f"max_episode_length={max_episode_length} steps "
+        f"(max_episode_length_s={env_cfg.episode_length_s})",
+        flush=True,
+    )
 
     device = torch.device(env_cfg.sim.device if isinstance(env_cfg.sim.device, str) else "cuda:0")
     print(f"[worker] creating CollectionSession on device={device}...", flush=True)
@@ -576,7 +748,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
         device=device,
         max_episode_length=max_episode_length,
         deterministic=args_cli.deterministic,
-        apply_exploration_ratio_filter=args_cli.enable_exploration_ratio_filter,
+        apply_exploration_ratio_filter=not args_cli.disable_exploration_ratio_filter,
+        disable_task_success_filter=args_cli.disable_task_success_filter,
         transformer_mini_batch_size=args_cli.transformer_mini_batch_size,
         use_kv_cache=not args_cli.no_kv_cache,
         kv_cache_max_seq_len=args_cli.kv_cache_max_seq_len,
@@ -587,8 +760,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
         flush=True,
     )
     print(f"[worker] CollectionSession ready in {time.time() - _t0:.1f}s", flush=True)
-    if args_cli.enable_exploration_ratio_filter:
-        print("[worker] exploration-ratio < 0.95 filter is ENABLED by CLI flag.", flush=True)
+    if args_cli.disable_exploration_ratio_filter:
+        print("[worker] exploration-ratio < 0.95 filter is DISABLED by CLI flag.", flush=True)
+    else:
+        print("[worker] exploration-ratio < 0.95 filter is ENABLED (default).", flush=True)
+    if args_cli.disable_task_success_filter:
+        print(
+            "[worker] task-success filter is DISABLED — admitting ALL episodes that pass the"
+            " exploration-ratio filter.",
+            flush=True,
+        )
+    else:
+        print("[worker] task-success filter is ENABLED (default) — only successful episodes saved.", flush=True)
 
     # Delete the placeholder file we created on env init (it's a temp zarr).
     try:
