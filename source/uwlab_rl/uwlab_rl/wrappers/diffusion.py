@@ -568,7 +568,20 @@ class DiffusionPolicyWrapper:
         self.obs_history_manager.reset_envs(reset_indices)
         if self.kv_cache is not None:
             self.kv_cache.reset(reset_indices)
-        self.policy.reset()
+        # IMPORTANT: In vectorized collection, envs reset asynchronously. A blanket
+        # policy.reset() can wipe global model state (or RNG) for *all* envs when only
+        # a subset resets, which can look like "OOD after reset" or sudden drops in
+        # success. Prefer a per-env reset when supported; otherwise only reset the
+        # full policy when every env resets together.
+        try:
+            self.policy.reset(reset_ids)
+        except TypeError:
+            try:
+                all_envs = (len(reset_indices) == self.num_envs)
+            except Exception:
+                all_envs = False
+            if all_envs:
+                self.policy.reset()
 
     def predict_action(self, obs_dict: dict[str, Any], env_indices: list[int] | None = None) -> torch.Tensor:
         """Predict action given Isaac Lab environment observations.

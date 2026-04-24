@@ -440,6 +440,10 @@ class StateTriggeredAugmentationEvalEventsCfg(StateTriggeredAugmentationTrainEve
     def __post_init__(self):
         if self.augmentation_handler is not None:
             self.augmentation_handler.params["eval_mode"] = True
+        
+        if self.randomize_env_cfg_unified is not None:
+            self.randomize_env_cfg_unified.params["coupled_progress_range"] = (1.0, 1.0)
+            self.randomize_env_cfg_unified.params["action_scale_progress_range"] = (1.0, 1.0)
 
     reset_from_reset_states = EventTerm(
         func=task_mdp.MultiResetManager,

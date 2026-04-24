@@ -607,7 +607,19 @@ class CollectionSession:
                     too_long = env.unwrapped.episode_length_buf >= episode_length_steps
                     manual_truncate = too_long & ~natural_reset
                     if manual_truncate.any():
+                        assert False, "Manual truncation should not be happening during this debug."
                         truncate_ids = manual_truncate.nonzero(as_tuple=False).reshape(-1)
+                        # Log per-job timeout truncations explicitly. These do NOT necessarily
+                        # correspond to Isaac Lab's built-in `time_out` termination term because
+                        # the env itself was constructed with a longer max episode length
+                        # (`--max_episode_length_s`) to allow per-job episode_length_s.
+                        stats = getattr(env.unwrapped.recorder_manager, "_filter_stats", None)
+                        if isinstance(stats, dict):
+                            term_counts = stats.setdefault("term_counts", {})
+                            term_step_sums = stats.setdefault("term_step_sums", {})
+                            ep_lens = env.unwrapped.episode_length_buf[truncate_ids]
+                            term_counts["timeout"] = term_counts.get("timeout", 0) + int(truncate_ids.numel())
+                            term_step_sums["timeout"] = term_step_sums.get("timeout", 0) + int(ep_lens.sum().item())
                         # Mirror the sequence that env.step() uses internally for resets so the
                         # recorder writes the episode out properly.
                         env.unwrapped.recorder_manager.record_pre_reset(truncate_ids)

@@ -38,94 +38,11 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from multiprocessing.connection import Listener
 from typing import Any
 
-
-# ---------------------------------------------------------------------------
-# Subprocess log streaming
-# ---------------------------------------------------------------------------
-
-
-class SubprocessLogStreamer:
-    """Tees a subprocess's stdout/stderr to a log file and a terminal stream.
-
-    Owns the output log file and a background daemon thread that reads from the
-    subprocess pipe line-by-line, writes raw bytes to the log file, and writes
-    prefixed bytes to ``term_stream`` so console output is easy to disambiguate
-    from the orchestrator's own prints.
-    """
-
-    def __init__(self, log_path: str, term_stream=sys.stdout, prefix: str = "") -> None:
-        self.log_path = log_path
-        self._term_stream = term_stream
-        self._prefix_b = prefix.encode("utf-8")
-        self._log_f = open(log_path, "wb")
-        self._thread: threading.Thread | None = None
-        self._pipe = None
-
-    def attach(self, pipe) -> None:
-        """Start streaming from ``pipe`` (typically ``proc.stdout``)."""
-        self._pipe = pipe
-        self._thread = threading.Thread(target=self._run, args=(pipe,), daemon=True)
-        self._thread.start()
-
-    def _run(self, pipe) -> None:
-        term_bin = getattr(self._term_stream, "buffer", None)
-        leading = True
-        try:
-            while True:
-                chunk = pipe.readline()
-                if not chunk:
-                    break
-                out = (self._prefix_b + chunk) if leading else chunk
-                leading = chunk.endswith(b"\n")
-                try:
-                    self._log_f.write(chunk)
-                    self._log_f.flush()
-                except Exception:
-                    pass
-                try:
-                    if term_bin is not None:
-                        term_bin.write(out)
-                        term_bin.flush()
-                    else:
-                        self._term_stream.write(out.decode("utf-8", errors="replace"))
-                        self._term_stream.flush()
-                except Exception:
-                    pass
-        finally:
-            try:
-                pipe.close()
-            except Exception:
-                pass
-
-    def tail(self, num_bytes: int = 4000) -> str:
-        """Return the last ``num_bytes`` of captured output as text."""
-        try:
-            self._log_f.flush()
-        except Exception:
-            pass
-        try:
-            with open(self.log_path, "rb") as f:
-                data = f.read()
-            return data[-num_bytes:].decode("utf-8", errors="replace")
-        except Exception:
-            return ""
-
-    def close(self, join_timeout_s: float = 5.0) -> None:
-        if self._thread is not None:
-            try:
-                self._thread.join(timeout=join_timeout_s)
-            except Exception:
-                pass
-        try:
-            self._log_f.close()
-        except Exception:
-            pass
-
+from subprocess_logging import SubprocessLogStreamer, TeeTextIO  # type: ignore[import-not-found]
 
 # ---------------------------------------------------------------------------
 # Collection worker handle
@@ -355,7 +272,7 @@ class CollectionWorker:
 _STEP_CKPT_RE = re.compile(r"step_(\d+)\.ckpt$")
 
 
-def _expected_train_checkpoint(output_dir: str, step: int = 40_000) -> str:
+def _expected_train_checkpoint(output_dir: str, step: int = 8_000) -> str:
     """Resolve the checkpoint path produced by a training iteration.
 
     Prefers the preferred ``step`` file if present, otherwise falls back to the highest
@@ -405,6 +322,7 @@ def launch_train_policy(
     pretrained_checkpoint: str | None = None,
     seed: int = 0,
     iteration: int = 0,
+    log_dir: str | None = None,
 ) -> subprocess.Popen:
     dataset_parts = [
         "{dataset_dir: " + str(d["dataset_dir"]) + ", sampling_ratio: " + str(d["sampling_ratio"]) + "}"
@@ -436,6 +354,23 @@ def launch_train_policy(
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     env.setdefault("PYTHONUNBUFFERED", "1")
     print(f"[orchestrator] launching training on GPU {gpu_id}:\n  {' '.join(command)}")
+    if log_dir is not None:
+        os.makedirs(log_dir, exist_ok=True)
+        train_log_path = os.path.join(log_dir, f"train_iter_{iteration}.log")
+        streamer = SubprocessLogStreamer(
+            log_path=train_log_path, term_stream=sys.stdout, prefix=f"[train:{iteration}] "
+        )
+        proc = subprocess.Popen(
+            command,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+        )
+        streamer.attach(proc.stdout)
+        setattr(proc, "_log_streamer", streamer)
+        setattr(proc, "_log_path", train_log_path)
+        return proc
     return subprocess.Popen(command, env=env)
 
 
@@ -451,6 +386,8 @@ def launch_eval_policy(
     no_video: bool = False,
     seed: int = 0,
     transformer_mini_batch_size: int = 64,
+    iteration: int = 0,
+    log_dir: str | None = None,
 ) -> subprocess.Popen:
     command = [
         sys.executable,
@@ -480,6 +417,23 @@ def launch_eval_policy(
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     env.setdefault("PYTHONUNBUFFERED", "1")
     print(f"[orchestrator] launching evaluation on GPU {gpu_id}:\n  {' '.join(command)}")
+    if log_dir is not None:
+        os.makedirs(log_dir, exist_ok=True)
+        eval_log_path = os.path.join(log_dir, f"eval_iter_{iteration}.log")
+        streamer = SubprocessLogStreamer(
+            log_path=eval_log_path, term_stream=sys.stdout, prefix=f"[eval:{iteration}] "
+        )
+        proc = subprocess.Popen(
+            command,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+        )
+        streamer.attach(proc.stdout)
+        setattr(proc, "_log_streamer", streamer)
+        setattr(proc, "_log_path", eval_log_path)
+        return proc
     return subprocess.Popen(command, env=env)
 
 
@@ -488,6 +442,12 @@ def _wait_and_check(proc: subprocess.Popen, label: str) -> None:
     if rc != 0:
         raise RuntimeError(f"{label} process failed with return code {rc}")
     print(f"[orchestrator] {label} finished with return code 0")
+    streamer = getattr(proc, "_log_streamer", None)
+    if streamer is not None:
+        try:
+            streamer.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -636,11 +596,11 @@ def main() -> None:
         (0.1, 0.2, 0.3, 0.4),
     ]
     lrs = [1e-4, 1e-5, 1e-5, 1e-5]
-    horizons = [(0.2, 0.5), (0.3, 0.8), (0.4, 0.9), (0.5, 1.0)]
+    horizons = [(0.1, 0.15), (0.3, 0.4), (0.4, 0.5), (0.5, 0.6)]
     episode_length_s_per_iter = [16.0, 16.0, 16.0, 16.0]
 
     initial_episode_length_s = 16.0
-    eval_episode_length_s = 16.0
+    eval_episode_length_s = 28.0
     # The worker is constructed once with a long enough max; per-job episode lengths
     # are enforced via manual truncation inside the worker.
     worker_max_episode_length_s = max(
@@ -681,6 +641,18 @@ def main() -> None:
         dataset_paths = []
         start_iteration = 0
         prior_iter_checkpoint = None
+
+    # ---- Local run logging (orchestrator + train/eval) -----------------------
+    # Capture everything this script prints (plus train/eval stdout) into a local
+    # directory under the run's output directory.
+    run_log_dir = os.path.join(base_output_dir, "run_logs")
+    os.makedirs(run_log_dir, exist_ok=True)
+    orchestrator_log_path = os.path.join(run_log_dir, "orchestrator.log")
+    _log_f = open(orchestrator_log_path, "a", encoding="utf-8")
+    _orig_stdout, _orig_stderr = sys.stdout, sys.stderr
+    sys.stdout = TeeTextIO(_orig_stdout, _log_f)  # type: ignore[assignment]
+    sys.stderr = TeeTextIO(_orig_stderr, _log_f)  # type: ignore[assignment]
+    print(f"[orchestrator] run logs: {run_log_dir}", flush=True)
 
     # ---- Spin up the long-lived Isaac Sim data-collection worker -------------
     worker = CollectionWorker(
@@ -762,6 +734,7 @@ def main() -> None:
                 pretrained_checkpoint=iteration_checkpoint,
                 seed=args.seed,
                 iteration=iteration,
+                log_dir=run_log_dir,
             )
 
             # While training runs on the train GPU, the data GPU is free. The next iteration's
@@ -790,6 +763,8 @@ def main() -> None:
                     no_video=args.no_video,
                     seed=args.seed,
                     transformer_mini_batch_size=args.transformer_mini_batch_size,
+                    iteration=iteration,
+                    log_dir=run_log_dir,
                 )
 
             next_dataset_path: str | None = None
@@ -812,6 +787,15 @@ def main() -> None:
                 _wait_and_check(eval_proc, f"evaluation iter {iteration}")
     finally:
         worker.close()
+        try:
+            sys.stdout = _orig_stdout  # type: ignore[assignment]
+            sys.stderr = _orig_stderr  # type: ignore[assignment]
+        except Exception:
+            pass
+        try:
+            _log_f.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -12,6 +12,16 @@
 
 """Launch Isaac Sim Simulator first."""
 
+# NOTE: Pre-import numpy and numba BEFORE isaaclab / AppLauncher. Isaac Sim's Kit runtime
+# mutates sys.path at startup, which causes any later `import numba` to resolve to
+# /isaac-sim/exts/omni.isaac.core_archive/pip_prebundle/numba (0.59.x, incompatible with
+# numpy 2.x) instead of the conda env's pinned numba 0.64. By importing them here while
+# PYTHONPATH ordering still holds, sys.modules caches the correct versions and every
+# subsequent `import numba` (e.g. via diffusion_policy.common.sampler when Hydra loads
+# TrainMLPImageWorkspace for the learner checkpoint) returns the cached conda module.
+import numpy  # noqa: F401
+import numba  # noqa: F401
+
 import argparse
 import contextlib
 import gymnasium as gym
@@ -63,10 +73,65 @@ parser.add_argument(
 )
 parser.add_argument("--render", action="store_true", default=False, help="Render environment while collecting demos.")
 parser.add_argument("--seed", type=int, default=0, help="Random seed for environment.")
+parser.add_argument(
+    "--disable_exploration_ratio_filter",
+    action="store_true",
+    default=False,
+    help=(
+        "If set, disable the check that rejects demos where the learner/exploration policy drove"
+        " more than 95%% of the episode. ON by default; pass this flag only for tasks where you"
+        " want to keep learner-dominated demos (e.g. pure imitation from the exploration policy)."
+    ),
+)
+parser.add_argument(
+    "--disable_task_success_filter",
+    action="store_true",
+    default=False,
+    help=(
+        "If set, admit every completed episode (regardless of the task-defined `success`"
+        " termination) as long as it passes the exploration-ratio filter. REQUIRES"
+        " --disable_exploration_ratio_filter to NOT be set, otherwise there is no filter left"
+        " and we'd admit literally every episode; an assert enforces this."
+    ),
+)
+parser.add_argument(
+    "--transformer_mini_batch_size",
+    type=int,
+    default=64,
+    help=(
+        "Mini-batch size used by DiffusionPolicyWrapper when serializing transformer inference"
+        " across envs. Bounds peak activation memory; too-small values (e.g. 8) dominate wall"
+        " time for large num_envs."
+    ),
+)
+parser.add_argument(
+    "--no_kv_cache",
+    action="store_true",
+    default=False,
+    help=(
+        "Disable the incremental KV-cached inference path inside DiffusionPolicyWrapper"
+        " (falls back to re-encoding the full trajectory each step). Useful for A/B profiling."
+    ),
+)
+parser.add_argument(
+    "--kv_cache_max_seq_len",
+    type=int,
+    default=None,
+    help=(
+        "Upper bound on per-env KV cache length. Defaults to the transformer's n_positions"
+        " (typically 1024). Lower it to reduce preallocated cache memory."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, remaining_args = parser.parse_known_args()
+
+if args_cli.disable_task_success_filter and args_cli.disable_exploration_ratio_filter:
+    raise SystemExit(
+        "--disable_task_success_filter requires the exploration-ratio filter to stay ON."
+        " Remove --disable_exploration_ratio_filter, or drop --disable_task_success_filter."
+    )
 
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
@@ -140,7 +205,15 @@ def process_agent_cfg(env_cfg, agent_cfg):
 
 
 def record_pre_reset(self, env_ids: Sequence[int] | None, force_export_or_skip=None) -> None:
-    """Patch recorder manager to gate saved demos by success and exploration usage."""
+    """Patch recorder manager to gate saved demos by success and exploration usage.
+
+    Admission uses two independent gates whose enable-state is read off the recorder:
+    (1) ``apply_exploration_ratio_filter`` — reject demos where the exploration policy
+    drove >=95% of the successful episode. (2) ``disable_task_success_filter`` — if set,
+    admit episodes that end in any reason as long as the ratio gate passes. If both
+    gates are disabled the configuration is nonsensical (no quality filter remains) and
+    the CLI enforces the invariant up front.
+    """
     if len(self.active_terms) == 0:
         return
 
@@ -153,15 +226,33 @@ def record_pre_reset(self, env_ids: Sequence[int] | None, force_export_or_skip=N
         key, value = term.record_pre_reset(env_ids)
         self.add_to_episodes(key, value, env_ids)
 
-    success_results = torch.zeros(len(env_ids), dtype=bool, device=self._env.device)
-    if hasattr(self._env, "termination_manager") and "success" in self._env.termination_manager.active_terms:
-        success_results |= self._env.termination_manager.get_term("success")[env_ids]
+    device = self._env.device
+    n = len(env_ids)
 
+    task_success = torch.zeros(n, dtype=bool, device=device)
+    if hasattr(self._env, "termination_manager") and "success" in self._env.termination_manager.active_terms:
+        task_success |= self._env.termination_manager.get_term("success")[env_ids]
+
+    ratio_pass = torch.ones(n, dtype=bool, device=device)
     if hasattr(self, "exploration_lengths"):
         episode_lengths = self._env.episode_length_buf[env_ids]
         exploration_lengths = self.exploration_lengths[env_ids]
+        # Per-env fraction of steps driven by the exploration policy; reject runs
+        # where the learner dominated (>=95%) of the successful episode.
         exploration_ratios = exploration_lengths / torch.clamp(episode_lengths, min=1)
-        success_results = success_results & (exploration_ratios < 0.95)
+        ratio_pass = exploration_ratios < 0.95
+
+    task_gate = (
+        torch.ones(n, dtype=bool, device=device)
+        if getattr(self, "disable_task_success_filter", False)
+        else task_success
+    )
+    ratio_gate = (
+        ratio_pass
+        if getattr(self, "apply_exploration_ratio_filter", True)
+        else torch.ones(n, dtype=bool, device=device)
+    )
+    success_results = task_gate & ratio_gate
 
     self.set_success_to_episodes(env_ids, success_results)
 
@@ -169,7 +260,14 @@ def record_pre_reset(self, env_ids: Sequence[int] | None, force_export_or_skip=N
         self.export_episodes(env_ids)
 
 
-def load_exploration_policy(checkpoint_path: str, device: torch.device, num_envs: int) -> DiffusionPolicyWrapper:
+def load_exploration_policy(
+    checkpoint_path: str,
+    device: torch.device,
+    num_envs: int,
+    mini_batch_size: int = 64,
+    use_kv_cache: bool = True,
+    kv_cache_max_seq_len: int | None = None,
+) -> DiffusionPolicyWrapper:
     """Load exploration diffusion policy from checkpoint."""
     with open(checkpoint_path, "rb") as f:
         payload = torch.load(f, pickle_module=dill)
@@ -182,7 +280,16 @@ def load_exploration_policy(checkpoint_path: str, device: torch.device, num_envs
 
     policy: BaseImagePolicy = workspace.ema_model if cfg.training.use_ema else workspace.model
     policy = policy.eval().to(device)
-    return DiffusionPolicyWrapper(policy, device, n_obs_steps=policy.n_obs_steps, num_envs=num_envs)
+    return DiffusionPolicyWrapper(
+        policy,
+        device,
+        n_obs_steps=policy.n_obs_steps,
+        num_envs=num_envs,
+        mini_batch_size=mini_batch_size,
+        use_kv_cache=use_kv_cache,
+        kv_cache_max_seq_len=kv_cache_max_seq_len,
+        profile_name="exploration",
+    )
 
 
 def sample_exploration_horizons(
@@ -232,9 +339,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
     # add expert obs into env_cfg
     agent_cfg = process_agent_cfg(env_cfg, agent_cfg)
 
-    episode_length = int(env_cfg.episode_length_s / (env_cfg.sim.dt * env_cfg.sim.render_interval))
+    episode_length = int(env_cfg.episode_length_s / env_cfg.decimation * env_cfg.sim.dt)
     max_exploration_horizon = int(args_cli.max_exploration_horizon * episode_length)
     min_exploration_horizon = int(args_cli.min_exploration_horizon * episode_length)
+    print(f"Episode length: {episode_length}, Max exploration horizon: {max_exploration_horizon}, Min exploration horizon: {min_exploration_horizon}")
+
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
@@ -257,10 +366,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
     num_envs = env.num_envs
     exploration_policy = None
     if args_cli.exploration_checkpoint:
-        exploration_policy = load_exploration_policy(args_cli.exploration_checkpoint, device, num_envs)
+        exploration_policy = load_exploration_policy(
+            args_cli.exploration_checkpoint,
+            device,
+            num_envs,
+            mini_batch_size=args_cli.transformer_mini_batch_size,
+            use_kv_cache=not args_cli.no_kv_cache,
+            kv_cache_max_seq_len=args_cli.kv_cache_max_seq_len,
+        )
         reset_ids = torch.arange(num_envs, device=device)
         exploration_policy.reset(reset_ids)
         print(f"[Exploration] Loaded checkpoint: {args_cli.exploration_checkpoint}")
+        print(
+            f"[Exploration] KV cache {'ENABLED' if not args_cli.no_kv_cache else 'DISABLED'} "
+            f"(max_seq_len={args_cli.kv_cache_max_seq_len}, "
+            f"mini_batch={args_cli.transformer_mini_batch_size})"
+        )
     else:
         print("[Exploration] No checkpoint provided; collecting expert-only demonstrations.")
 
@@ -276,8 +397,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
     )
     exploration_lengths = torch.zeros((num_envs,), device=device, dtype=torch.int32)
     recorder_manager.exploration_lengths = exploration_lengths
-    if exploration_policy is not None:
-        recorder_manager.record_pre_reset = MethodType(record_pre_reset, recorder_manager)
+    # Install gated record_pre_reset + filter config regardless of exploration, so that
+    # --disable_task_success_filter (expert-only admit-all) works even when no exploration
+    # policy is loaded.
+    recorder_manager.record_pre_reset = MethodType(record_pre_reset, recorder_manager)
+    recorder_manager.apply_exploration_ratio_filter = not args_cli.disable_exploration_ratio_filter
+    recorder_manager.disable_task_success_filter = args_cli.disable_task_success_filter
+    if args_cli.disable_exploration_ratio_filter:
+        print("[Filter] exploration-ratio < 0.95 filter is DISABLED by CLI flag.")
+    else:
+        print("[Filter] exploration-ratio < 0.95 filter is ENABLED (default).")
+    if args_cli.disable_task_success_filter:
+        print(
+            "[Filter] task-success filter is DISABLED — admitting ALL episodes that pass the"
+            " exploration-ratio filter."
+        )
+    else:
+        print("[Filter] task-success filter is ENABLED (default) — only successful episodes saved.")
 
     # simulate environment -- run everything in inference mode
     current_recorded_demo_count = 0
@@ -300,8 +436,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
                 expert_actions = mean if args_cli.deterministic else torch.normal(mean, std)
                 actions[use_expert] = expert_actions[use_expert]
             if use_exploration.any() and exploration_policy is not None:
-                exploration_actions = exploration_policy.predict_action(obs_dict).to(device)
-                actions[use_exploration] = exploration_actions[use_exploration]
+                # Feed obs only for envs actually running exploration this step, and pass
+                # their absolute env ids so per-env transformer trajectories grow only
+                # on those steps (matches collect_demos_worker.py's convention).
+                exploration_env_ids = use_exploration.nonzero(as_tuple=False).reshape(-1)
+                obs_buf = env.unwrapped.obs_buf
+                policy_obs = obs_buf.get("policy", obs_buf) if isinstance(obs_buf, dict) else obs_buf
+                exploration_obs = {k: v[use_exploration] for k, v in policy_obs.items()}
+                exploration_actions = exploration_policy.predict_action(exploration_obs, exploration_env_ids)
+                actions[use_exploration] = exploration_actions.to(device)
 
             # Mask actions to zero for environments in their first step after reset since first image may not be valid
             first_step_mask = env.unwrapped.episode_length_buf == 0

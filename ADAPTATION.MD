@@ -33,7 +33,7 @@ or
 python scripts/reinforcement_learning/rsl_rl/play.py     --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-ContactDynamics-Play-v0     --num_envs 1024     --checkpoint logs/rsl_rl/ur5e_robotiq_2f85_omnireset_agent/2026-04-08_18-31-13/model_3200.pt    env.scene.insertive_object=fbdrawerbottom     env.scene.receptive_object=fbdrawerbox --headless --num_steps 500
 ```
 
-## Training a policy on state + time based action + force augmentations:
+## Evaling a policy trained on state + time based action + force augmentations:
 ```
 python scripts/reinforcement_learning/rsl_rl/play.py     --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-Augmented-Play-v0     --num_envs 1     --checkpoint logs/rsl_rl/ur5e_robotiq_2f85_omnireset_agent/2026-04-21_01-36-13/model_3700.pt     env.scene.insertive_object=peg     env.scene.receptive_object=peghole --video --video_length 100 --headless
 ```

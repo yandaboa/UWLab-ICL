@@ -155,7 +155,7 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedDistillationCfg(
     def __post_init__(self):
         super().__post_init__()
 
-        self.episode_length_s = 32.0
+        self.episode_length_s = 16.0
 
         self.scene.robot = EXPLICIT_UR5E_ROBOTIQ_2F85.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
