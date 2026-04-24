@@ -526,6 +526,13 @@ class DiffusionPolicyWrapper:
                     f"approx_mem={cache_bytes / 1e9:.2f}GB)",
                     flush=True,
                 )
+
+        self._kv_prev_action: torch.Tensor | None = None
+        if self.use_kv_cache and self.kv_cache is not None and getattr(
+            self.policy, "include_action_in_context", False
+        ):
+            da = int(getattr(self.policy, "action_dim", 0))
+            self._kv_prev_action = torch.zeros(num_envs, da, device=device, dtype=torch.float32)
         else:
             if self.is_transformer:
                 print(
@@ -568,6 +575,9 @@ class DiffusionPolicyWrapper:
         self.obs_history_manager.reset_envs(reset_indices)
         if self.kv_cache is not None:
             self.kv_cache.reset(reset_indices)
+        if self._kv_prev_action is not None:
+            rid = torch.tensor(reset_indices, device=self.device, dtype=torch.long)
+            self._kv_prev_action[rid] = 0
         # IMPORTANT: In vectorized collection, envs reset asynchronously. A blanket
         # policy.reset() can wipe global model state (or RNG) for *all* envs when only
         # a subset resets, which can look like "OOD after reset" or sudden drops in
@@ -650,6 +660,21 @@ class DiffusionPolicyWrapper:
         per-env storage. Attention mask and position-id construction lives inside the
         policy so that subclasses can change the token structure (e.g. interleaved
         obs+action tokens, separator tokens, multi-token fusion) without any edits here.
+
+        When ``policy.include_action_in_context`` is True (concat or interleaved
+        transformer), Isaac observations typically omit ``action``; this path injects
+        ``chunk_inputs["action"]`` from ``_kv_prev_action`` (zeros after reset, then the
+        last predicted action per env) so ``_embed_new_step`` receives the previous-step
+        rollout action the policy was trained with.
+
+        For interleaved (DT-style) policies, the per-step token count ``K >= 2``
+        varies across envs: step 0 emits only ``[obs_0]`` (``num_new_tokens=1``)
+        while step ``t >= 1`` emits ``[a_{t-1}, (r_{t-1}), obs_t]``
+        (``num_new_tokens=K``). The KV manager's ``append`` takes a single scalar
+        ``num_new_tokens`` per call, so this path buckets each mini-batch by
+        is-first-step (``past_length == 0``) and runs up to two forwards per
+        mini-batch to keep the scalar contract. Non-interleaved policies (K=1)
+        skip bucketing.
         """
         assert self.kv_cache is not None
         self._profile.step_start(len(env_indices))
@@ -663,9 +688,13 @@ class DiffusionPolicyWrapper:
         if getattr(self.policy, "include_reward_in_context", False):
             allowed_keys.add("reward")
 
+        K = int(getattr(self.policy, "tokens_per_step", 1))
+        needs_first_step_bucketing = K >= 2
+
         for start in range(0, B_total, mini_batch_size):
             end = min(start + mini_batch_size, B_total)
             chunk_ids = env_indices[start:end]
+            chunk_len = len(chunk_ids)
 
             # Per-env slice, filtered to the keys the policy's encoder / normalizer know about.
             # The raw Isaac Lab obs dict contains extra fields (e.g. ``joint_vel``) that the
@@ -677,27 +706,55 @@ class DiffusionPolicyWrapper:
                 if key in allowed_keys
             }
 
-            with self._profile.time_block("kv_gather"):
-                past_kvs, past_lengths, max_past = self.kv_cache.gather(chunk_ids)
+            if self._kv_prev_action is not None:
+                ids_t = torch.tensor(chunk_ids, device=self.device, dtype=torch.long)
+                chunk_inputs["action"] = self._kv_prev_action[ids_t]
 
-            with self._profile.time_block("kv_forward"), torch.no_grad():
-                result = self.policy.kv_cached_step(
-                    chunk_inputs,
-                    past_key_values=past_kvs,
-                    past_lengths=past_lengths,
-                    max_past=max_past,
-                )
+            if needs_first_step_bucketing:
+                chunk_ids_t = torch.tensor(chunk_ids, device=self.device, dtype=torch.long)
+                is_first = (self.kv_cache.lengths[chunk_ids_t] == 0)
+                first_local = is_first.nonzero(as_tuple=False).flatten().tolist()
+                rest_local = (~is_first).nonzero(as_tuple=False).flatten().tolist()
+                bucket_locals = [lst for lst in (first_local, rest_local) if lst]
+            else:
+                bucket_locals = [list(range(chunk_len))]
 
-            num_new_tokens = int(result.get("num_new_tokens", 1))
-            with self._profile.time_block("kv_append"):
-                self.kv_cache.append(
-                    chunk_ids,
-                    result["past_key_values"],
-                    past_lengths,
-                    num_new_tokens=num_new_tokens,
-                )
+            chunk_out: list[torch.Tensor | None] = [None] * chunk_len
 
-            out_actions.append(result["action"].to(torch.float32))
+            for local_idxs in bucket_locals:
+                bucket_ids = [chunk_ids[i] for i in local_idxs]
+                local_idxs_t = torch.tensor(local_idxs, device=self.device, dtype=torch.long)
+                bucket_inputs = {k: v.index_select(0, local_idxs_t) for k, v in chunk_inputs.items()}
+
+                with self._profile.time_block("kv_gather"):
+                    past_kvs, past_lengths, max_past = self.kv_cache.gather(bucket_ids)
+
+                with self._profile.time_block("kv_forward"), torch.no_grad():
+                    result = self.policy.kv_cached_step(
+                        bucket_inputs,
+                        past_key_values=past_kvs,
+                        past_lengths=past_lengths,
+                        max_past=max_past,
+                    )
+
+                num_new_tokens = int(result.get("num_new_tokens", 1))
+                with self._profile.time_block("kv_append"):
+                    self.kv_cache.append(
+                        bucket_ids,
+                        result["past_key_values"],
+                        past_lengths,
+                        num_new_tokens=num_new_tokens,
+                    )
+
+                acts = result["action"].detach().to(torch.float32)
+                if self._kv_prev_action is not None:
+                    bucket_ids_t = torch.tensor(bucket_ids, device=self.device, dtype=torch.long)
+                    self._kv_prev_action[bucket_ids_t] = acts
+
+                for j, li in enumerate(local_idxs):
+                    chunk_out[li] = acts[j]
+
+            out_actions.append(torch.stack(chunk_out, dim=0))  # type: ignore[arg-type]
 
         self._profile.maybe_print()
         return torch.cat(out_actions, dim=0)

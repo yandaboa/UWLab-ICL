@@ -348,6 +348,7 @@ if __name__ == "__main__":
             " DiffusionPolicyWrapper emits per-stage inference timings."
         ),
     )
+    parser.add_argument("--checkpoint_num", type=int, default=5000, help="Checkpoint number to resume from")
     args = parser.parse_args()
 
     if args.disable_task_success_filter:
@@ -364,11 +365,11 @@ if __name__ == "__main__":
         (0.1, 0.2, 0.3, 0.4),
     ]
     lrs = [1e-4, 1e-5, 1e-5, 1e-5]
-    horizons = [(0.1, 0.15), (0.3, 0.4), (0.4, 0.5), (0.5, 0.6)]
-    episode_length_s = [16.0, 16.0, 16.0, 16.0]
+    horizons = [(0.1, 0.3), (0.15, 0.35), (0.2, 0.4), (0.25, 0.5)]
+    episode_length_s = [8.0, 9.0, 10.0, 11.0]
 
-    initial_episode_length_s = 16.0
-    eval_episode_length_s = 28.0
+    initial_episode_length_s = 6.0
+    eval_episode_length_s = 11.0
     exp_name = args.exp_name
     wandb_project = args.wandb_project
 
@@ -388,7 +389,7 @@ if __name__ == "__main__":
             else args.initial_dataset_path
         )
         exploration_checkpoint = _expected_train_checkpoint(
-            os.path.join(base_output_dir, f"iteration_{args.start_iteration - 1}")
+            os.path.join(base_output_dir, f"iteration_{args.start_iteration - 1}"), args.checkpoint_num
         )
         dataset_path = os.path.join(base_output_dir, f"dataset-iteration-{args.start_iteration}")
         if args.get_dataset:
@@ -474,7 +475,7 @@ if __name__ == "__main__":
             iteration=iteration,
         )
 
-        iteration_checkpoint = _expected_train_checkpoint(train_output_dir)
+        iteration_checkpoint = _expected_train_checkpoint(train_output_dir, args.checkpoint_num)
         if not args.skip_eval:
             eval_policy(
                 task=args.eval_task,
