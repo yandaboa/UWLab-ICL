@@ -32,8 +32,27 @@ def _clone_hidden_state(hidden_state: Any) -> Any:
     return hidden_state
 
 
+# Per-dim signed-magnitude hi from the ``augmentation_handler`` config in
+# ``StateTriggeredAugmentationTrainEventsCfg``. The augmentation samples |x| in [lo, hi] then
+# flips sign with prob 0.5, so the effective per-dim range is [-hi, hi] (plus 0 when inactive).
+_AUGMENTATION_SWEEP_SPECS: dict[str, dict[str, Any]] = {
+    "action_offset": {
+        "term_key": "robot_action_offset",
+        "hi_per_dim": (7.0, 7.0, 7.0, 3.0, 3.0, 3.0),
+    },
+    "task_frame_force_bias": {
+        "term_key": "robot_task_frame_force_bias",
+        "hi_per_dim": (10.0, 10.0, 10.0, 5.0, 5.0, 5.0),
+    },
+}
+
+
 class PrivilegedPolicyDebugger:
     """Sweeps privileged observation values and plots the resulting action distributions."""
+
+    _MATERIAL_SWEEP_KEYS = frozenset({"friction", "restitution"})
+    _AUGMENTATION_SWEEP_KEYS = frozenset(_AUGMENTATION_SWEEP_SPECS.keys())
+    _SUPPORTED_SWEEP_KEYS = _MATERIAL_SWEEP_KEYS | _AUGMENTATION_SWEEP_KEYS
 
     def __init__(
         self,
@@ -48,9 +67,10 @@ class PrivilegedPolicyDebugger:
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._sweep_key = sweep_key.strip().lower()
-        if self._sweep_key not in {"friction", "restitution"}:
+        if self._sweep_key not in self._SUPPORTED_SWEEP_KEYS:
             raise ValueError(
-                f"Unsupported privileged debug sweep key '{sweep_key}'. Supported values are 'friction' and 'restitution'."
+                f"Unsupported privileged debug sweep key '{sweep_key}'. Supported values are: "
+                f"{sorted(self._SUPPORTED_SWEEP_KEYS)}."
             )
         self._sweep_range = sweep_range
         self._num_sweep_points = num_sweep_points
@@ -58,8 +78,8 @@ class PrivilegedPolicyDebugger:
         self._sweep_values_cache: dict[str, np.ndarray] = {}
         self._time_series_history: dict[str, dict[str, Any]] = {}
         print(f"[INFO] Saving privileged debug plots to: {self._output_dir}")
-        print(f"[INFO] Sweeping privileged material property: {self._sweep_key}")
-        if self._include_joint_insertive_receptive:
+        print(f"[INFO] Sweeping privileged observation: {self._sweep_key}")
+        if self._sweep_key in self._MATERIAL_SWEEP_KEYS and self._include_joint_insertive_receptive:
             print("[INFO] Adding joint insertive/receptive privileged sweep.")
 
     def plot_step(self, obs: Any, step_idx: int) -> None:
@@ -79,6 +99,9 @@ class PrivilegedPolicyDebugger:
         return policy_obs
 
     def _resolve_sweep_targets(self, policy_obs: Any) -> list[dict[str, Any]]:
+        if self._sweep_key in self._AUGMENTATION_SWEEP_KEYS:
+            return self._resolve_augmentation_sweep_targets(policy_obs)
+
         candidate_keys = [key for key in policy_obs.keys() if key.endswith("_material_properties")]
         if not candidate_keys:
             raise ValueError("No material property observation terms found under obs['policy'].")
@@ -94,6 +117,44 @@ class PrivilegedPolicyDebugger:
                     f"from obs['policy']. Available keys: {list(policy_obs.keys())}"
                 )
             targets.append(self._joint_target_for_terms([insertive_key, receptive_key], policy_obs))
+        return targets
+
+    def _resolve_augmentation_sweep_targets(self, policy_obs: Any) -> list[dict[str, Any]]:
+        """One target per observation dim, with per-dim signed sweep ``[-hi_dim, +hi_dim]``.
+
+        Probing each dim in isolation (others left at their observed values) decouples the policy's
+        response to individual offset/force-bias axes, which have different magnitudes per axis in
+        the ``augmentation_handler`` config.
+        """
+        spec = _AUGMENTATION_SWEEP_SPECS[self._sweep_key]
+        term_key: str = spec["term_key"]
+        hi_per_dim: tuple[float, ...] = spec["hi_per_dim"]
+        if term_key not in policy_obs:
+            raise KeyError(
+                f"Observation term '{term_key}' not found in obs['policy']. "
+                f"Available keys: {list(policy_obs.keys())}"
+            )
+        obs_value = policy_obs[term_key]
+        num_components = self._get_num_components(obs_value)
+        if num_components != len(hi_per_dim):
+            raise ValueError(
+                f"Observation term '{term_key}' has {num_components} components, expected {len(hi_per_dim)} "
+                f"(matching the {self._sweep_key} augmentation config)."
+            )
+        targets = []
+        for dim_idx in range(num_components):
+            if self._sweep_range is not None:
+                dim_sweep_range = self._sweep_range
+            else:
+                hi = float(hi_per_dim[dim_idx])
+                dim_sweep_range = (-hi, hi)
+            targets.append({
+                "target_name": f"{term_key}_dim_{dim_idx}",
+                "term_keys": [term_key],
+                "component_indices": [dim_idx],
+                "component_label": self._sweep_key,
+                "sweep_range": dim_sweep_range,
+            })
         return targets
 
     def _get_num_components(self, obs_value: torch.Tensor) -> int:
@@ -164,9 +225,16 @@ class PrivilegedPolicyDebugger:
         history["times"].append(step_idx)
         history["action_mean"].append(stats["action_mean"].clone())
 
-    def _build_sweep_values(self, current_value: torch.Tensor, history_key: str) -> torch.Tensor:
+    def _build_sweep_values(
+        self,
+        current_value: torch.Tensor,
+        history_key: str,
+        target_sweep_range: tuple[float, float] | None = None,
+    ) -> torch.Tensor:
         if history_key not in self._sweep_values_cache:
-            if self._sweep_range is not None:
+            if target_sweep_range is not None:
+                sweep_min, sweep_max = target_sweep_range
+            elif self._sweep_range is not None:
                 sweep_min, sweep_max = self._sweep_range
             else:
                 center = float(current_value.detach().cpu().item())
@@ -203,7 +271,11 @@ class PrivilegedPolicyDebugger:
             raise ValueError("Expected at least one privileged debug target term.")
         current_values_tensor = torch.cat(current_values, dim=0)
         history_key = self._target_history_key(target_name, sweep_target["component_label"])
-        sweep_values = self._build_sweep_values(current_values_tensor.mean(), history_key)
+        sweep_values = self._build_sweep_values(
+            current_values_tensor.mean(),
+            history_key,
+            target_sweep_range=sweep_target.get("sweep_range"),
+        )
 
         actor_state_snapshot = self._snapshot_actor_hidden_state()
         action_means = []

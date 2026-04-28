@@ -711,10 +711,11 @@ class Ur5eRobotiq2f85RlStateCfg(ManagerBasedRLEnvCfg):
         self.sim.physx.gpu_collision_stack_size = 2**31
 
         # Render settings
-        self.sim.render.enable_dlssg = True
+        self.sim.render.enable_dlssg = False
         self.sim.render.enable_ambient_occlusion = True
         self.sim.render.enable_reflections = True
         self.sim.render.enable_dl_denoiser = True
+        self.sim.render.antialiasing_mode = "DLAA"
 
 
 # Training configuration (Stage 1: no curriculum, implicit actuator, no sysid DR)
@@ -759,3 +760,5 @@ class Ur5eRobotiq2f85RelCartesianOSCFinetuneEvalCfg(Ur5eRobotiq2f85RlStateCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.robot = EXPLICIT_UR5E_ROBOTIQ_2F85.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+        self.terminations.success = DoneTerm(func=task_mdp.consecutive_success_state, params={"num_consecutive_successes": 10})

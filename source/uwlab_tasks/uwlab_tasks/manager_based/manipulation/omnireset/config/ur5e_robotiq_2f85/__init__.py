@@ -195,6 +195,16 @@ gym.register(
     },
 )
 
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Augmented-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.privileged_training_cfg:Ur5eRobotiq2f85RelCartesianOSCAugmentedPlayCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Base_PPORunnerCfg",
+    },
+)
+
 # ASTEROID: state-only data-collection env for distilling the augmented privileged policy
 # (trained with Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedTrainCfg) into a student
 # that observes only the basic state terms in BasePolicyCfg. Designed to be passed as

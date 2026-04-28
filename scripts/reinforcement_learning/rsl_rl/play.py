@@ -38,6 +38,22 @@ parser.add_argument(
 parser.add_argument("--num_steps", type=int, default=None, help="Number of steps to simulate.")
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument(
+    "--num_bins",
+    type=int,
+    default=0,
+    help=(
+        "If > 0, discretize the 6 continuous arm action dims into this many uniform bins "
+        "over [--discretize_clip_val, +--discretize_clip_val]. The binary gripper dim (index 6) "
+        "is always thresholded at 0. 0 disables discretization (continuous actions)."
+    ),
+)
+parser.add_argument(
+    "--discretize_clip_val",
+    type=float,
+    default=2.0,
+    help="Symmetric clip range used when binning continuous arm actions. Default: 2.0.",
+)
+parser.add_argument(
     "--save_rollout",
     action="store_true",
     default=False,
@@ -63,21 +79,31 @@ parser.add_argument(
     type=str,
     default="friction",
     help=(
-        "Privileged material property to sweep across all insertive/receptive/table material terms. "
-        "Supported values: 'friction' and 'restitution'."
+        "Privileged observation to sweep. "
+        "'friction' / 'restitution' sweep material-property terms (joint insertive/receptive via "
+        "--privileged_debug_joint_insertive_receptive). "
+        "'action_offset' / 'task_frame_force_bias' sweep each of the 6 dims of the corresponding "
+        "augmentation observation term (robot_action_offset / robot_task_frame_force_bias); "
+        "default per-dim sweep ranges match [-hi, +hi] from augmentation_handler."
     ),
 )
 parser.add_argument(
     "--privileged_debug_sweep_min",
     type=float,
     default=None,
-    help="Optional minimum counterfactual value for the privileged debug sweep.",
+    help=(
+        "Optional minimum counterfactual value for the privileged debug sweep. "
+        "For 'action_offset' / 'task_frame_force_bias', overrides the per-dim defaults uniformly."
+    ),
 )
 parser.add_argument(
     "--privileged_debug_sweep_max",
     type=float,
     default=None,
-    help="Optional maximum counterfactual value for the privileged debug sweep.",
+    help=(
+        "Optional maximum counterfactual value for the privileged debug sweep. "
+        "For 'action_offset' / 'task_frame_force_bias', overrides the per-dim defaults uniformly."
+    ),
 )
 parser.add_argument(
     "--privileged_debug_num_points",
@@ -133,6 +159,9 @@ from isaaclab.utils.dict import print_dict
 
 from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
+
+from isaaclab.envs.mdp.observations import last_action
+
 from uwlab_rl.rsl_rl.exporter import export_policy_as_jit, export_policy_as_onnx
 
 import isaaclab_tasks  # noqa: F401
@@ -140,6 +169,49 @@ import uwlab_tasks  # noqa: F401
 from privileged_policy_debug import PrivilegedPolicyDebugger
 from isaaclab_tasks.utils import get_checkpoint_path
 from uwlab_tasks.utils.hydra import hydra_task_config
+
+def get_perturbed_env_solving_actions(env, actions: torch.Tensor) -> torch.Tensor:
+    """Get the perturbed environment-solving actions.
+    We assume that the actions are coming from a post-trained policy on sysID gains
+    
+    Args:
+        env: The environment to get the perturbed actions for.
+        actions: The actions to perturb.
+        
+    Returns:
+    """
+    action_scale = torch.tensor([0.01, 0.01, 0.002, 0.02, 0.02, 0.2], device=actions.device, dtype=actions.dtype)
+    return env.action_manager._terms.get("arm").inverse_process_actions(actions, original_scale=action_scale)
+
+def set_action_override(env, actions: torch.Tensor) -> torch.Tensor:
+    """Set the action override.
+    """
+    env.action_override = actions
+
+def discretize_actions(actions: torch.Tensor, num_bins: int, clip_val: float) -> torch.Tensor:
+    """Snap the 6 continuous arm dims to the nearest uniform bin center; threshold gripper at 0.
+
+    Args:
+        actions: Raw policy actions, shape (N, 7). Dims 0-5 are continuous arm OSC,
+                 dim 6 is the binary gripper signal.
+        num_bins: Number of uniform bins to partition [-clip_val, +clip_val] for dims 0-5.
+        clip_val: Symmetric clip range for the continuous arm dimensions.
+
+    Returns:
+        Discretized action tensor with the same shape as ``actions``.
+    """
+    result = actions.clone()
+    # Uniform bin centers in [-clip_val, +clip_val]
+    bin_centers = torch.linspace(-clip_val, clip_val, num_bins, device=actions.device, dtype=actions.dtype)
+    # Snap each continuous arm dim to nearest bin center
+    for d in range(6):
+        vals = result[:, d].clamp(-clip_val, clip_val)
+        diffs = (vals.unsqueeze(-1) - bin_centers.unsqueeze(0)).abs()
+        result[:, d] = bin_centers[diffs.argmin(dim=-1)]
+    # Gripper: threshold at 0 → {-1, +1}
+    result[:, 6] = torch.where(actions[:, 6] >= 0, torch.ones_like(actions[:, 6]), -torch.ones_like(actions[:, 6]))
+    return result
+
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
@@ -219,6 +291,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.plot_privileged_debug:
         assert env.num_envs == 1, "--plot_privileged_debug requires --num_envs 1."
 
+    if args_cli.num_bins > 0:
+        print(f"[INFO]: Action discretization ENABLED — {args_cli.num_bins} bins, clip_val={args_cli.discretize_clip_val}")
+    else:
+        print("[INFO]: Action discretization DISABLED (continuous)")
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
     if agent_cfg.class_name == "OnPolicyRunner":
@@ -227,7 +303,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    runner.load(resume_path)
+    # play only needs the actor for inference, so we skip loading the critic and its
+    # obs normalizer. this allows replaying checkpoints whose critic obs space differs
+    # from the current env (e.g. legacy/privileged critics with extra terms).
+    loaded_dict = torch.load(resume_path, weights_only=False, map_location=agent_cfg.device)
+    actor_only_state_dict = {
+        k: v
+        for k, v in loaded_dict["model_state_dict"].items()
+        if not (k.startswith("critic.") or k.startswith("critic_obs_normalizer."))
+    }
+    skipped_keys = sorted(set(loaded_dict["model_state_dict"]) - set(actor_only_state_dict))
+    if skipped_keys:
+        print(f"[INFO]: Skipping critic params from checkpoint: {len(skipped_keys)} keys")
+    runner.alg.policy.load_state_dict(actor_only_state_dict, strict=False)
+    if "iter" in loaded_dict:
+        runner.current_learning_iteration = loaded_dict["iter"]
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
@@ -315,6 +405,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions = policy(obs)
             if rollout_data is not None:
                 rollout_data["actions"].append(_to_cpu_detached(actions))
+            # rescale actions, this solves for action scale + offset changes.
+            # remove this line if you dont want to compensate for action scale + offset for the policy automatically
+            set_action_override(env.unwrapped, actions.clone())
+            actions = get_perturbed_env_solving_actions(env.unwrapped, actions)
+            if args_cli.num_bins > 0:
+                actions = discretize_actions(actions, args_cli.num_bins, args_cli.discretize_clip_val)
+
             # env stepping
             obs, rewards, dones, _ = env.step(actions)
             if dones.any():

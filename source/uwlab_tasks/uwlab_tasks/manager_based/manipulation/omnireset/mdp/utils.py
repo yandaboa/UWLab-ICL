@@ -374,6 +374,18 @@ def read_metadata_from_usd_directory(usd_path: str) -> dict:
     with open(local_path) as f:
         metadata_file = yaml.safe_load(f)
 
+    # Normalize: new metadata format uses assembled_offsets (plural list) where the first
+    # entry is canonical. Inject assembled_offset (singular) so downstream code works with
+    # both old and new metadata formats.
+    if (
+        metadata_file
+        and "assembled_offsets" in metadata_file
+        and "assembled_offset" not in metadata_file
+    ):
+        print("All offsets:")
+        print(metadata_file["assembled_offsets"])
+        metadata_file["assembled_offset"] = metadata_file["assembled_offsets"][0]
+
     return metadata_file
 
 

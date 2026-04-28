@@ -1,3 +1,7 @@
+import torch
+from isaaclab.envs.mdp.observations import generic_io_descriptor, record_shape
+from isaaclab.envs import ManagerBasedEnv
+
 from isaaclab.sim import configclass
 
 from uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.rl_state_cfg import (
@@ -19,12 +23,26 @@ from isaaclab.sensors import ContactSensorCfg
 from ... import mdp as task_mdp
 from uwlab_assets import UWLAB_CLOUD_ASSETS_DIR
 
+@generic_io_descriptor(dtype=torch.float32, observation_type="Action", on_inspect=[record_shape])
+def custom_last_action(env: ManagerBasedEnv, action_name: str | None = None) -> torch.Tensor:
+    """The last input action to the environment.
+
+    The name of the action term for which the action is required. If None, the
+    entire action tensor is returned.
+    """
+    if hasattr(env, "action_override"):
+        assert env.action_override.shape == env.action_manager.action.shape, "Action override shape does not match the action shape"
+        return env.action_override
+    if action_name is None:
+        return env.action_manager.action
+    else:
+        return env.action_manager.get_term(action_name).raw_actions
 
 @configclass
 class BasePolicyCfg(ObsGroup):
     """Base policy observations for the UR5e + Robotiq 2F-85 robot."""
 
-    prev_actions = ObsTerm(func=task_mdp.last_action)
+    prev_actions = ObsTerm(func=custom_last_action)
 
     joint_pos = ObsTerm(func=task_mdp.joint_pos)
 
@@ -340,8 +358,8 @@ class RandomizeGainsTrainEventsCfg(TrainEventCfg):
             "terminal_damping_ratio": (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
             "initial_scales": (0.02, 0.02, 0.02, 0.02, 0.02, 0.2),
             "target_scales": (0.01, 0.01, 0.002, 0.02, 0.02, 0.2),
-            "coupled_progress_range": (0.0, 1.0),
-            "action_scale_progress_range": (0.0, 1.0),
+            "coupled_progress_range": (0.0, 1.5),
+            "action_scale_progress_range": (0.0, 1.5),
         },
     )
 
@@ -404,28 +422,40 @@ class StateTriggeredAugmentationTrainEventsCfg(RandomizeGainsTrainEventsCfg):
             "curriculum_min_activation_start_step_range": (2, 15),
             "curriculum_update_every_n_steps": 500,
             # Dynamics: per-joint multiplicative scales on the captured baseline.
-            "armature_scale_range": (0.8, 1.2),
-            "static_friction_scale_range": (0.8, 1.2),
-            "dynamic_friction_scale_range": (0.8, 1.2),
-            "viscous_friction_scale_range": (0.8, 1.2),
+            # "armature_scale_range": (0.8, 1.2),
+            "armature_scale_range": (1.0, 1.0),
+            # "static_friction_scale_range": (0.8, 1.2),
+            "static_friction_scale_range": (1.0, 1.0),
+            # "dynamic_friction_scale_range": (0.8, 1.2),
+            "dynamic_friction_scale_range": (1.0, 1.0),
+            # "viscous_friction_scale_range": (0.8, 1.2),
+            "viscous_friction_scale_range": (1.0, 1.0),
             # Gains: per-axis Kp/damping-ratio scales on the captured baseline.
             "kp_scale_range": (
-                (0.7, 0.7, 0.7, 0.8, 0.8, 0.8),
-                (1.3, 1.3, 1.3, 1.2, 1.2, 1.2),
+                # (0.7, 0.7, 0.7, 0.8, 0.8, 0.8),
+                # (1.3, 1.3, 1.3, 1.2, 1.2, 1.2),
+                (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+                (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
             ),
-            "damping_ratio_scale_range": (0.9, 1.1),
+            "damping_ratio_scale_range": (1.0, 1.0),
+            # "damping_ratio_scale_range": (0.9, 1.1),
             # Action: per-axis action scale + raw action offset (6-DOF delta pose).
-            "action_scale_range": (0.9, 1.1),
+            "action_scale_range": (1.0, 1.0),
+            # "action_scale_range": (0.5, 1.5),
             "action_offset_range": (
-                (3.0, 3.0, 3.0, 2.0, 2.0, 2.0),
-                (7.0, 7.0, 7.0, 3.0, 3.0, 3.0),
+                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                # (3.0, 3.0, 3.0, 2.0, 2.0, 2.0),
+                # (7.0, 7.0, 7.0, 3.0, 3.0, 3.0),
                 # (1.0, 1.0, 1.0, 0.5, 0.5, 0.5),
                 # (4.0, 4.0, 4.0, 2.0, 2.0, 2.0),
             ),
             # Force: per-axis task-frame force bias (added to OSC task-force output).
             "task_frame_force_bias_range": (
-                (3.0, 3.0, 3.0, 2.0, 2.0, 2.0),
-                (10.0, 10.0, 10.0, 5.0, 5.0, 5.0),
+                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                # (3.0, 3.0, 3.0, 2.0, 2.0, 2.0),
+                # (10.0, 10.0, 10.0, 5.0, 5.0, 5.0),
                 # (1.0, 1.0, 1.0, 0.5, 0.5, 0.5),
                 # (5.0, 5.0, 5.0, 2.0, 2.0, 2.0),
             ),
@@ -644,7 +674,8 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesi
     def __post_init__(self):
         super().__post_init__()
 
-        self.observations.policy = PrivilegedPolicyCfg()
+        self.observations.policy = BasePolicyCfg()
+        # self.observations.policy = PrivilegedPolicyCfg()
         self.observations.critic = PrivilegedCriticCfg()
         self.scene.robot = EXPLICIT_UR5E_ROBOTIQ_2F85.replace(prim_path="{ENV_REGEX_NS}/Robot")
         # self.observations.privileged_info = PrivilegedInfoObservationCfg()
@@ -680,6 +711,18 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedPlayCfg(Ur5eRobotiq2f85Re
     """Privileged play configuration with state/time-triggered augmentation."""
 
     events: StateTriggeredAugmentationEvalEventsCfg = StateTriggeredAugmentationEvalEventsCfg()
+
+@configclass
+class Ur5eRobotiq2f85RelCartesianOSCAugmentedPlayCfg(Ur5eRobotiq2f85RelCartesianOSCFinetuneEvalCfg):
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.observations.policy = BasePolicyCfg()
+
+        self.events.augmentation_handler = StateTriggeredAugmentationTrainEventsCfg().augmentation_handler
+        self.events.augmentation_handler.params["eval_mode"] = True
+
 @configclass
 class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainWithContactDynamicsCfg(Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg):
     """Privileged observation training configuration for the UR5e + Robotiq 2F-85 robot with contact dynamics."""
