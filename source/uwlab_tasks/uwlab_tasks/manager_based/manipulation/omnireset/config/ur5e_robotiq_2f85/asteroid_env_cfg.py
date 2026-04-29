@@ -63,7 +63,8 @@ class AsteroidDistillationObservationsCfg:
 
     policy: BasePolicyCfg = BasePolicyCfg()
     data_collection: BasePolicyCfg | None = BasePolicyCfg()
-    expert_obs: PrivilegedPolicyCfg | None = PrivilegedPolicyCfg()
+    # expert_obs: PrivilegedPolicyCfg | None = PrivilegedPolicyCfg()
+    expert_obs: BasePolicyCfg | None = BasePolicyCfg()
     critic = None
 
 
@@ -85,12 +86,6 @@ class AsteroidDataCollectionEventCfg(StateTriggeredAugmentationEvalEventsCfg):
     same action config as privileged training.
     """
 
-    def __post_init__(self):
-        super().__post_init__()
-        if self.randomize_env_cfg_unified is not None:
-            self.randomize_env_cfg_unified.params["coupled_progress_range"] = (1.0, 1.0)
-            self.randomize_env_cfg_unified.params["action_scale_progress_range"] = (1.0, 1.0)
-
     reset_from_reset_states = EventTerm(
         func=task_mdp.MultiResetManager,
         mode="reset",
@@ -110,12 +105,6 @@ class AsteroidDataCollectionEventCfg(StateTriggeredAugmentationEvalEventsCfg):
 @configclass
 class AsteroidStudentEvalEventCfg(StateTriggeredAugmentationEvalEventsCfg):
     """Student eval events with terminal-regime unified randomization + augmentation."""
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.randomize_env_cfg_unified is not None:
-            self.randomize_env_cfg_unified.params["coupled_progress_range"] = (1.0, 1.0)
-            self.randomize_env_cfg_unified.params["action_scale_progress_range"] = (1.0, 1.0)
 
     reset_from_reset_states = EventTerm(
         func=task_mdp.MultiResetManager,
@@ -159,14 +148,14 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedDistillationCfg(
 
         self.scene.robot = EXPLICIT_UR5E_ROBOTIQ_2F85.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-        event_name = "augmentation_handler"
-        if self.observations.expert_obs is not None:
-            self.observations.expert_obs.augmentation_active_mask = ObsTerm(
-                func=task_mdp.get_augmentation_active_mask, params={"event_name": event_name}
-            )
-            self.observations.expert_obs.augmentation_external_wrench = ObsTerm(
-                func=task_mdp.get_augmentation_external_wrench, params={"event_name": event_name}
-            )
+        # event_name = "augmentation_handler"
+        # if self.observations.expert_obs is not None:
+        #     self.observations.expert_obs.augmentation_active_mask = ObsTerm(
+        #         func=task_mdp.get_augmentation_active_mask, params={"event_name": event_name}
+        #     )
+        #     self.observations.expert_obs.augmentation_external_wrench = ObsTerm(
+        #         func=task_mdp.get_augmentation_external_wrench, params={"event_name": event_name}
+        #     )
 
         self.terminations.success = DoneTerm(
             func=task_mdp.consecutive_success_state_with_min_length,
@@ -194,10 +183,11 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedAugmentedStudentEvalCfg(
     def __post_init__(self):
         super().__post_init__()
 
-        self.terminations.success = DoneTerm(
-            func=task_mdp.consecutive_success_state,
-            params={"num_consecutive_successes": 10},
-        )
+        # self.terminations.success = DoneTerm(
+        #     func=task_mdp.consecutive_success_state,
+        #     params={"num_consecutive_successes": 10},
+        # )
+        self.terminations.success = None
         if hasattr(self.terminations, "early_success"):
             self.terminations.early_success = None
 

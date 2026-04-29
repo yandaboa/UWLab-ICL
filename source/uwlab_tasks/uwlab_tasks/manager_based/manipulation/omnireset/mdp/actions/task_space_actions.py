@@ -134,6 +134,35 @@ class RelCartesianOSCAction(ActionTerm):
         self._raw_action_offset[env_ids] = 0.0
         self._task_frame_force_bias[env_ids] = 0.0
 
+    def inverse_process_actions(
+        self,
+        original_action: torch.Tensor,
+        original_scale: torch.Tensor | None = None,
+        original_offset: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Map an action from a reference (scale, offset) into this term's perturbed (scale, offset).
+
+        Returns `a'` such that feeding `a'` to `process_actions` under the current
+        per-env `_scale` and `_raw_action_offset` produces an identical `scaled`
+        vector (and therefore identical `_ee_pos_des`, `_ee_quat_des`, per-tick
+        torques, and joint trajectory) to feeding `original_action` under
+        `(original_scale, original_offset)`.
+
+        Exact at every physics tick provided `_task_frame_force_bias == 0` and
+        `_scale` has no zero entries. Defaults: `original_scale = _scale_default`,
+        `original_offset = 0`.
+        """
+        if original_scale is None:
+            original_scale = self._scale_default
+        if original_offset is None:
+            original_offset = torch.zeros_like(self._raw_action_offset)
+        # (a + off_o) ⊙ scale_o = (a' + off_n) ⊙ scale_n  →  a' = (a + off_o) ⊙ (scale_o / scale_n) − off_n
+        # just scale the first 6 dimensions, last one is gripper, a separate action
+        act = original_action[..., :6]
+        inversed_action = (act + original_offset) * (original_scale / self._scale) - self._raw_action_offset
+        original_action[..., :6] = inversed_action
+        return original_action
+
     def process_actions(self, actions: torch.Tensor):
         """Scale raw 6-DOF deltas and compute desired EE pose for the PD tracker.
 

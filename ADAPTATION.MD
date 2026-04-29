@@ -57,3 +57,31 @@ python run_incontext_exploration_parallel.py \
   --receptive_object peghole \
   --no_video
 ```
+
+## Smoke test (discrete-AR head + inverse-action transform)
+
+End-to-end smoke for the discrete autoregressive head, inverse-action data
+collection, sample/greedy mode persistence, and the orchestrator wiring. Uses
+the tiny `in_context_adaptation_interleave_smoke.yaml` config (64-dim trunk,
+2 layers, 50 grad steps, batch size 4) so a full iteration finishes in a
+couple of minutes.
+
+```
+python run_incontext_exploration.py \
+  --expert_policy_checkpoint logs/rsl_rl/teacher/exported/policy.pt \
+  --config_name in_context_adaptation_interleave_smoke.yaml \
+  --exp_name smoke_disc_ar \
+  --wandb_project incontext_adaptation_smoke \
+  --output_dir logs/smoke_disc_ar \
+  --num_demos 2000 \
+  --num_data_envs 1024 \
+  --num_eval_envs 16 \
+  --num_eval_episodes 16 \
+  --max_iterations 1 \
+  --insertive_object peg \
+  --receptive_object peghole \
+  --no_video \
+  --use_inverse_actions \
+  --num_bins 20 \
+  --discretize_clip_val 50.0 \
+```

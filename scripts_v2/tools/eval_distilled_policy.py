@@ -53,6 +53,22 @@ parser.add_argument(
         " large num_envs."
     ),
 )
+parser.add_argument(
+    "--stats_output_path",
+    type=str,
+    default=None,
+    help=(
+        "Optional path to a JSON file that will be written with final eval statistics"
+        " (episodes, successful_episodes, success_rate, averaged Metrics/* and Episode_Reward/*)."
+        " Consumed by run_incontext_exploration.py via incontext_eval_log.IncontextEvalLog."
+    ),
+)
+parser.add_argument(
+    "--iteration",
+    type=int,
+    default=None,
+    help="DAgger iteration id to embed in the stats file (ignored unless --stats_output_path is set).",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -63,6 +79,9 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 """Rest everything follows."""
+
+import os
+import sys
 
 import gymnasium as gym
 import numpy as np
@@ -86,6 +105,14 @@ from uwlab_rl.wrappers.diffusion import DiffusionPolicyWrapper
 
 import uwlab_tasks  # noqa: F401
 from uwlab_tasks.utils.hydra import hydra_task_compose
+
+# Make the repo-root abstraction importable when this script is invoked as
+# `python scripts_v2/tools/eval_distilled_policy.py` (sys.path[0] is scripts_v2/tools,
+# so the repo root needs to be added explicitly).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from incontext_eval_log import write_eval_stats_file  # noqa: E402
 
 
 def _set_seeds(seed: int):
@@ -144,14 +171,20 @@ def _capture_frame(obs_dict, env, env_idx: int, cam_keys: list, scene_cam_names:
     return np.concatenate(imgs, axis=1) if imgs else None
 
 
-def _count_successes(env, reset_ids: torch.Tensor, term_names: list[str]) -> int:
-    count = 0
-    term_dones = env.unwrapped.termination_manager._term_dones[reset_ids]
-    for term_row in term_dones:
-        active = term_row.nonzero(as_tuple=False).flatten().cpu().tolist()
-        if any(term_names[idx] == "success" for idx in active):
-            count += 1
-    return count
+def _get_progress_context(env):
+    """Return the ``progress_context`` reward term object, which exposes a
+    per-env ``success`` bool tensor recomputed each step from the analytical
+    position+orientation alignment check (the same source ``success_reward``
+    reads from). Returns None if the term isn't present (then we fall back to
+    the legacy 'success' termination flag, if any).
+    """
+    rm = getattr(env.unwrapped, "reward_manager", None)
+    if rm is None:
+        return None
+    try:
+        return rm.get_term_cfg("progress_context").func
+    except (AttributeError, KeyError, ValueError):
+        return None
 
 
 def _collect_metrics(infos: dict, episode_metrics: dict):
@@ -165,11 +198,11 @@ def _collect_metrics(infos: dict, episode_metrics: dict):
 def _print_results(episodes: int, successful_episodes: int, episode_metrics: dict):
     print("\nFinal Statistics:")
     print(f"Total trajectories evaluated: {episodes}")
-    if successful_episodes > 0 or "Episode_Termination/success" in episode_metrics:
+    if episodes > 0:
         print(f"Successful trajectories: {successful_episodes}")
         print(f"Success rate: {successful_episodes / episodes * 100:.2f}%")
     else:
-        print("Success rate: Not calculable (success metric not found in environment)")
+        print("Success rate: N/A (no completed episodes)")
     if episode_metrics:
         print("\nAverage Metrics:")
         for metric_name, values in sorted(episode_metrics.items()):
@@ -202,14 +235,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
         n_obs_steps=policy.n_obs_steps,
         num_envs=args_cli.num_envs,
         mini_batch_size=args_cli.transformer_mini_batch_size,
+        sample_action=False,
     )
+
+    # Persist the AR head's bin spec next to the checkpoint (no-op for continuous heads).
+    spec_path = os.path.join(os.path.dirname(args_cli.checkpoint) or ".", "discretize_spec.json")
+    saved = wrapped_policy.save_discretize_spec(spec_path)
+    if saved is not None:
+        print(f"[eval] discrete AR head spec written to {saved}")
 
     obs_dict, _ = env.reset()
     dones = torch.ones(args_cli.num_envs, dtype=torch.bool, device=device)
     wrapped_policy.reset((dones > 0).nonzero(as_tuple=False).reshape(-1))
 
+    # Per-episode success is computed analytically from the progress_context
+    # reward term's ``success`` buffer (position + orientation alignment).
+    # An episode counts as a success if ``success`` was True at *any* step,
+    # which matches the training-time semantic without requiring an early-
+    # terminating ``success`` term in the eval env.
+    progress_ctx = _get_progress_context(env)
     term_names = env.unwrapped.termination_manager._term_names  # type: ignore
-    assert "success" in term_names, "Success term not found in termination manager"
+    fallback_to_term = progress_ctx is None
+    if fallback_to_term and "success" not in term_names:
+        raise RuntimeError(
+            "Eval env exposes neither a 'progress_context' reward term nor a 'success' "
+            "termination term — cannot determine episode success."
+        )
+    episode_ever_successful = torch.zeros(args_cli.num_envs, dtype=torch.bool, device=device)
 
     episodes, steps, successful_episodes = 0, 0, 0
     episode_metrics: dict = {}
@@ -247,6 +299,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
 
             steps += 1
 
+            # Accumulate per-step success into the per-env "ever-successful" buffer
+            # BEFORE handling resets, so the last step of a successful episode counts.
+            if progress_ctx is not None and hasattr(progress_ctx, "success"):
+                episode_ever_successful |= progress_ctx.success
+
             if isinstance(dones, torch.Tensor):
                 new_ids = (dones > 0).nonzero(as_tuple=False)
                 episodes += len(new_ids)
@@ -258,7 +315,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
 
             if isinstance(dones, torch.Tensor) and dones.any():
                 reset_ids = (dones > 0).nonzero(as_tuple=False).reshape(-1)
-                successful_episodes += _count_successes(env, reset_ids, term_names)
+                if progress_ctx is not None:
+                    successful_episodes += int(episode_ever_successful[reset_ids].sum().item())
+                    episode_ever_successful[reset_ids] = False
+                else:
+                    # Legacy: read 'success' termination flag (one-shot, set the step it triggers).
+                    term_dones = env.unwrapped.termination_manager._term_dones[reset_ids]
+                    success_idx = term_names.index("success")
+                    successful_episodes += int(term_dones[:, success_idx].sum().item())
                 wrapped_policy.reset(reset_ids)
                 _collect_metrics(infos, episode_metrics)
                 steps = 0
@@ -275,6 +339,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
                     pbar.set_description(f"Evaluating trajectories (Success: {rate:.2f}%)")
 
     _print_results(episodes, successful_episodes, episode_metrics)
+    if args_cli.stats_output_path is not None:
+        write_eval_stats_file(
+            stats_path=args_cli.stats_output_path,
+            episodes=episodes,
+            successful_episodes=successful_episodes,
+            episode_metrics=episode_metrics,
+            iteration=args_cli.iteration,
+            checkpoint=args_cli.checkpoint,
+            task=args_cli.task,
+        )
+        print(f"Wrote eval stats to: {args_cli.stats_output_path}")
     if pbar is not None:
         pbar.close()
     env.close()

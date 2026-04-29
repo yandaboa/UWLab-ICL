@@ -122,6 +122,47 @@ parser.add_argument(
         " (typically 1024). Lower it to reduce preallocated cache memory."
     ),
 )
+parser.add_argument(
+    "--use_inverse_actions",
+    action="store_true",
+    default=False,
+    help=(
+        "If set, compute the analytically optimal action for the augmented environment: "
+        "expert_action is mapped through the arm OSC term's inverse_process_actions so that "
+        "feeding the result to the perturbed env produces the same physical effect as the expert's "
+        "intended action. This allows collecting high-quality demos even when the expert was "
+        "trained on a non-augmented MDP."
+    ),
+)
+parser.add_argument(
+    "--num_bins",
+    type=int,
+    default=0,
+    help=(
+        "If > 0, discretize the 6 continuous arm action dims into this many uniform bins over "
+        "[--discretize_clip_val, +--discretize_clip_val] before saving and executing actions. "
+        "Gripper dim (index 6) is always sign-thresholded to {-1, +1}. "
+        "0 disables discretization. A discretize_spec.json is written alongside the dataset."
+    ),
+)
+parser.add_argument(
+    "--discretize_clip_val",
+    type=float,
+    default=2.0,
+    help="Symmetric clip range for binning continuous arm action dims. Default: 2.0.",
+)
+parser.add_argument(
+    "--expert_action_scale",
+    type=float,
+    nargs=6,
+    default=[0.01, 0.01, 0.002, 0.02, 0.02, 0.2],
+    metavar=("sx", "sy", "sz", "rx", "ry", "rz"),
+    help=(
+        "Six-element action scale the expert was trained with (XYZ + axis-angle). "
+        "Used as the 'original_scale' for inverse_process_actions when --use_inverse_actions is set. "
+        "Default: [0.01, 0.01, 0.002, 0.02, 0.02, 0.2]."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -150,6 +191,7 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
 from uwlab.utils.datasets import ZarrDatasetFileHandler
 
 import uwlab_tasks  # noqa: F401
+from uwlab_rl.utils.action_discretize import discretize_actions, make_discretize_spec, save_discretize_spec
 from uwlab_rl.wrappers.diffusion import DiffusionPolicyWrapper
 from uwlab_tasks.manager_based.manipulation.omnireset.mdp.recorders.recorders_cfg import (
     ActionStateRecorderManagerTransformedActionCfg,
@@ -268,7 +310,7 @@ def load_exploration_policy(
     use_kv_cache: bool = True,
     kv_cache_max_seq_len: int | None = None,
 ) -> DiffusionPolicyWrapper:
-    """Load exploration diffusion policy from checkpoint."""
+    """Load exploration diffusion policy from checkpoint (stochastic inference for data collection)."""
     with open(checkpoint_path, "rb") as f:
         payload = torch.load(f, pickle_module=dill)
 
@@ -289,6 +331,7 @@ def load_exploration_policy(
         use_kv_cache=use_kv_cache,
         kv_cache_max_seq_len=kv_cache_max_seq_len,
         profile_name="exploration",
+        sample_action=True,
     )
 
 
@@ -362,6 +405,38 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
     expert_policy = loader(bc.experts_path[0]).to(device)
     expert_policy.eval()
 
+    # Inverse-action + discretization setup
+    use_inverse = args_cli.use_inverse_actions
+    num_bins = args_cli.num_bins
+    disc_clip = args_cli.discretize_clip_val
+    arm_term = env.unwrapped.action_manager._terms.get("arm")
+
+    if use_inverse and arm_term is None:
+        raise RuntimeError("Could not find 'arm' action term in environment — cannot compute inverse actions.")
+
+    # ``original_scale`` for inverse_process_actions — must be supplied via CLI.
+    expert_original_scale = torch.tensor(
+        args_cli.expert_action_scale, device=device, dtype=torch.float32
+    )
+
+    if use_inverse:
+        print(f"[InverseAction] ENABLED — expert original scale: {expert_original_scale.tolist()}")
+    if num_bins > 0:
+        disc_spec = make_discretize_spec(num_bins, disc_clip, action_dim=env.action_space.shape[-1])
+        spec_path = save_discretize_spec(disc_spec, output_dir)
+        print(f"[Discretize] ENABLED — {num_bins} bins, clip_val={disc_clip}")
+        print(f"[Discretize] Spec saved → {spec_path}")
+    else:
+        disc_spec = None
+        print("[Discretize] DISABLED (continuous actions saved)")
+
+    # Per-env buffer tracking the expert's intended action (in expert-scale space).
+    # Patched into obs_buf["expert_obs"]["prev_actions"] each step so the expert
+    # sees its own previous action rather than the discretized/perturbed env action.
+    num_envs_val = env.num_envs
+    action_dim_val = env.action_space.shape[-1]
+    prev_expert_actions = torch.zeros((num_envs_val, action_dim_val), device=device)
+
     # optional exploration policy
     num_envs = env.num_envs
     exploration_policy = None
@@ -417,28 +492,53 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
 
     # simulate environment -- run everything in inference mode
     current_recorded_demo_count = 0
+    num_episodes = 0
+    num_successes = 0
     with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
         # Initialize tqdm progress bar if num_demos > 0
-        pbar = tqdm(total=args_cli.num_demos, desc="Recording Demonstrations", unit="demo")
+        pbar = tqdm(total=args_cli.num_demos, desc="Recording Demonstrations (Success: 0.00%)", unit="demo")
 
         while True:
-            # choose expert or exploration policy per environment based on horizon.
+            # ── (1) Patch expert obs: replace prev_actions with what expert *thinks* it executed ──
+            # Isaac Lab's obs_buf["expert_obs"]["prev_actions"] reflects the last *env* action
+            # (which may be discretized/perturbed). We override it with prev_expert_actions so
+            # the expert policy stays in-distribution across its own action-feedback loop.
+            if use_inverse and isinstance(env.unwrapped.obs_buf.get("expert_obs"), dict):
+                env.unwrapped.obs_buf["expert_obs"]["prev_actions"] = prev_expert_actions.clone()
+
+            # ── (2) Choose expert or exploration policy per environment ──
             episode_steps = env.unwrapped.episode_length_buf
             use_exploration = (episode_steps < exploration_horizons) & (exploration_policy is not None)
             use_expert = ~use_exploration
             exploration_lengths += use_exploration.int()
             recorder_manager.exploration_lengths = exploration_lengths
 
+            # ── (3) Query expert: get intended actions in expert's unaugmented action space ──
             expert_policy_obs = expert_obs_fn(env)
             mean, std = expert_policy.compute_distribution(expert_policy_obs)
-            actions = torch.zeros((num_envs, env.action_space.shape[-1]), device=device)
+            # mean shape: (num_envs, action_dim)
+            expert_mean = mean
+            # expert_mean = mean if args_cli.deterministic else torch.normal(mean, std)
+
+            # ── (4) Compute env actions: apply inverse OSC mapping so the augmented env
+            #        produces the same physical effect as the expert's intended action ──
+            if use_inverse:
+                # inverse_process_actions modifies in-place → clone first
+                env_actions = arm_term.inverse_process_actions(
+                    expert_mean.clone(), original_scale=expert_original_scale
+                )
+            else:
+                env_actions = expert_mean.clone()
+
+            # ── (5) Discretize if requested ──
+            if num_bins > 0:
+                env_actions = discretize_actions(env_actions, num_bins, disc_clip)
+
+            # ── (6) Build final action tensor (expert for expert envs, exploration for others) ──
+            actions = torch.zeros((num_envs, action_dim_val), device=device)
             if use_expert.any():
-                expert_actions = mean if args_cli.deterministic else torch.normal(mean, std)
-                actions[use_expert] = expert_actions[use_expert]
+                actions[use_expert] = env_actions[use_expert]
             if use_exploration.any() and exploration_policy is not None:
-                # Feed obs only for envs actually running exploration this step, and pass
-                # their absolute env ids so per-env transformer trajectories grow only
-                # on those steps (matches collect_demos_worker.py's convention).
                 exploration_env_ids = use_exploration.nonzero(as_tuple=False).reshape(-1)
                 obs_buf = env.unwrapped.obs_buf
                 policy_obs = obs_buf.get("policy", obs_buf) if isinstance(obs_buf, dict) else obs_buf
@@ -446,11 +546,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
                 exploration_actions = exploration_policy.predict_action(exploration_obs, exploration_env_ids)
                 actions[use_exploration] = exploration_actions.to(device)
 
-            # Mask actions to zero for environments in their first step after reset since first image may not be valid
+            # Mask actions to zero on the first step after reset (image may not yet be valid)
             first_step_mask = env.unwrapped.episode_length_buf == 0
             if torch.any(first_step_mask):
                 actions[first_step_mask, :-1] = 0.0
-                actions[first_step_mask, -1] = -1.0  # close gripper
+                actions[first_step_mask, -1] = -1.0  # keep gripper closed
 
             expert_mask = use_expert.unsqueeze(-1)
             expert_mask_recorder.set_mask(expert_mask)
@@ -459,8 +559,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
             env.unwrapped.obs_buf["data_collection"]["expert_action_mean"] = mean.clone()
             env.unwrapped.obs_buf["data_collection"]["expert_action_std"] = std.clone()
 
-            # env stepping
-            env.step(actions)
+            # ── (7) Step the environment with the (possibly discretized/inverse) action ──
+            _obs, rewards, dones, _infos = env.step(actions)
+            if dones.any():
+                num_episodes += dones.sum().item()
+                num_successes += torch.logical_and(rewards > 0.1, dones).sum().item()
+
+            # ── (8) Update prev_expert_actions for ALL envs.
+            #        Expert envs: track expert_mean (what expert intended).
+            #        Exploration envs: also store expert_mean so the expert stays in-distribution
+            #        when it resumes on those envs next iteration.
+            prev_expert_actions = expert_mean.clone()
 
             if env.unwrapped.reset_buf.any():
                 reset_ids = env.unwrapped.reset_buf.nonzero(as_tuple=False).reshape(-1)
@@ -468,6 +577,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
                     len(reset_ids), min_exploration_horizon, max_exploration_horizon, device
                 )
                 exploration_lengths[reset_ids] = 0
+                # Reset the expert-action history for reset envs so the policy sees a clean start
+                prev_expert_actions[reset_ids] = 0.0
                 if exploration_policy is not None:
                     exploration_policy.reset(reset_ids)
 
@@ -477,6 +588,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
                 increment = new_count - current_recorded_demo_count
                 current_recorded_demo_count = new_count
                 pbar.update(increment)
+                rate = (num_successes / num_episodes * 100) if num_episodes > 0 else 0.0
+                pbar.set_description(f"Recording Demonstrations (Success: {rate:.2f}%)")
 
             if args_cli.num_demos > 0 and new_count >= args_cli.num_demos:
                 print(f"All {args_cli.num_demos} demonstrations recorded. Exiting the app.")
@@ -490,6 +603,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
                 env.render()
 
         pbar.close()
+
+    print(f"Number of episodes: {num_episodes}")
+    print(f"Number of successes: {num_successes}")
+    if num_episodes:
+        print(f"Success rate: {num_successes / num_episodes:.2%}")
 
     # close the simulator
     env.close()

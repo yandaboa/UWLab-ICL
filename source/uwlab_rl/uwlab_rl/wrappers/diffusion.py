@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import json
 import os
 import time
 import torch
@@ -429,6 +430,7 @@ class DiffusionPolicyWrapper:
         kv_cache_max_seq_len: int | None = None,
         kv_cache_storage_dtype: torch.dtype = torch.bfloat16,
         profile_name: str = "exploration",
+        sample_action: bool = False,
     ):
         """Initialize the policy wrapper.
 
@@ -464,6 +466,17 @@ class DiffusionPolicyWrapper:
         self.n_obs_steps = n_obs_steps
         self.num_envs = num_envs
         self.mini_batch_size = mini_batch_size
+
+        # Persist the sampling-vs-greedy decision on the policy. Read by the
+        # InterleavedTransformerImagePolicy's _decode_step / predict_action /
+        # _ar_inference_loop. Heads that don't use this attribute are unaffected.
+        if hasattr(policy, "sample_action"):
+            policy.sample_action = bool(sample_action)
+            print(
+                f"[DiffusionPolicyWrapper] sample_action={bool(sample_action)} "
+                f"({'stochastic' if sample_action else 'greedy'} inference).",
+                flush=True,
+            )
 
         self.is_image_policy = self._is_image_policy()
         self.is_transformer = self._is_transformer()
@@ -542,6 +555,20 @@ class DiffusionPolicyWrapper:
 
         self.action_queue = [[] for _ in range(num_envs)]
 
+        # Discrete-AR head reports ``outputs_raw_action``: action is already
+        # decoded from bins, so we don't unnormalize. AR tokens stay on the
+        # policy's transient sub-sequence and never enter the persistent cache.
+        self._ar_discrete_head = self._detect_ar_discrete_head()
+        if self._ar_discrete_head is not None:
+            spec = self._ar_discrete_head.get_spec()
+            print(
+                f"[DiffusionPolicyWrapper] discrete AR action head detected "
+                f"(num_bins={spec['num_bins']}, clip_val={spec['clip_val']}, "
+                f"action_dim={spec['action_dim']}, gripper_dim={spec['gripper_dim']}). "
+                f"Action tokens are NOT added to the main KV cache.",
+                flush=True,
+            )
+
         profile_enabled = os.environ.get("DIFFUSION_POLICY_PROFILE", "0") not in ("", "0", "false", "False")
         self._profile = _ProfileAccumulator(
             name=profile_name,
@@ -551,6 +578,31 @@ class DiffusionPolicyWrapper:
         )
 
         self.policy.reset()
+
+    # Discrete-AR head support. Duck-typed to avoid an import-time dependency
+    # on diffusion_policy when the policy is continuous.
+    def _detect_ar_discrete_head(self):
+        head = getattr(self.policy, "output_head", None)
+        if head is None or not getattr(head, "outputs_raw_action", False):
+            return None
+        if not hasattr(head, "get_spec") or not hasattr(head, "arm_bin_centers"):
+            return None
+        return head
+
+    def save_discretize_spec(self, path: str) -> str | None:
+        """Write the AR head's bin spec next to a checkpoint. No-op for continuous heads."""
+        if self._ar_discrete_head is None:
+            return None
+        spec = self._ar_discrete_head.get_spec()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(spec, f, indent=2)
+        return path
+
+    def get_discretize_spec(self) -> dict | None:
+        if self._ar_discrete_head is None:
+            return None
+        return self._ar_discrete_head.get_spec()
 
     def _is_transformer(self) -> bool:
         """Detect if the policy is a transformer-based model that requires attention_mask."""

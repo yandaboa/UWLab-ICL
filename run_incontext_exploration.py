@@ -5,6 +5,8 @@ import os
 import re
 import subprocess
 
+from incontext_eval_log import IncontextEvalLog
+
 
 def collect_demos(
     task: str,
@@ -26,6 +28,10 @@ def collect_demos(
     use_kv_cache: bool = True,
     kv_cache_max_seq_len: int | None = None,
     profile_worker: bool = False,
+    use_inverse_actions: bool = False,
+    num_bins: int = 0,
+    discretize_clip_val: float = 50.0,
+    expert_action_scale: list[float] | None = None,
 ):
     """Spawn ``collect_demos_asteroid.py`` as a subprocess to collect a zarr dataset."""
     command = [
@@ -75,6 +81,12 @@ def collect_demos(
         command += ["--no_kv_cache"]
     if kv_cache_max_seq_len is not None:
         command += ["--kv_cache_max_seq_len", str(kv_cache_max_seq_len)]
+    if use_inverse_actions:
+        command += ["--use_inverse_actions"]
+    if num_bins > 0:
+        command += ["--num_bins", str(num_bins), "--discretize_clip_val", str(discretize_clip_val)]
+    if expert_action_scale is not None:
+        command += ["--expert_action_scale", *(str(s) for s in expert_action_scale)]
 
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -102,6 +114,7 @@ def train_policy(
     pretrained_checkpoint: str | None = None,
     seed: int = 0,
     iteration: int = 0,
+    config_overrides: list[str] | None = None,
 ):
     dataset_str = "task.dataset.dataset_config=["
     for data in dataset_config:
@@ -129,6 +142,10 @@ def train_policy(
     if pretrained_checkpoint is not None:
         command.append("checkpoint.pretrained_ckpt_path=" + pretrained_checkpoint)
 
+    # Forward arbitrary Hydra ``key=value`` overrides (e.g. policy.hidden_dim=128).
+    if config_overrides:
+        command.extend(config_overrides)
+
     train_process_return = subprocess.run(command)
     if train_process_return.returncode != 0:
         print("Training process failed with return code:", train_process_return.returncode)
@@ -147,6 +164,8 @@ def eval_policy(
     no_video: bool = False,
     seed: int = 0,
     transformer_mini_batch_size: int = 64,
+    stats_output_path: str | None = None,
+    iteration: int | None = None,
 ):
     """Spawn ``eval_distilled_policy.py`` as a subprocess to evaluate a trained checkpoint."""
     command = [
@@ -172,6 +191,10 @@ def eval_policy(
         command += [f"env.scene.receptive_object={receptive_object}"]
     if not no_video:
         command += ["--save_video", "--enable_cameras"]
+    if stats_output_path is not None:
+        command += ["--stats_output_path", stats_output_path]
+    if iteration is not None:
+        command += ["--iteration", str(iteration)]
 
     eval_process = subprocess.run(command)
     if eval_process.returncode != 0:
@@ -349,6 +372,54 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument("--checkpoint_num", type=int, default=5000, help="Checkpoint number to resume from")
+    parser.add_argument(
+        "--use_inverse_actions",
+        action="store_true",
+        help=(
+            "Forwarded to the collection subprocess: compute the analytically optimal action"
+            " for the augmented MDP via the OSC term's inverse_process_actions, so a non-augmented"
+            " expert produces correct demos in the augmented env."
+        ),
+    )
+    parser.add_argument(
+        "--num_bins",
+        type=int,
+        default=0,
+        help=(
+            "If > 0, forward to the collection subprocess and discretize the 6 continuous arm"
+            " dims into this many uniform bins over [-discretize_clip_val, +discretize_clip_val]."
+            " Gripper is sign-thresholded. A discretize_spec.json is written alongside the dataset."
+        ),
+    )
+    parser.add_argument(
+        "--discretize_clip_val",
+        type=float,
+        default=2.0,
+        help="Symmetric clip range for binning continuous arm action dims (forwarded). Default: 2.0.",
+    )
+    parser.add_argument(
+        "--expert_action_scale",
+        type=float,
+        nargs=6,
+        default=[0.01, 0.01, 0.002, 0.02, 0.02, 0.2],
+        metavar=("sx", "sy", "sz", "rx", "ry", "rz"),
+        help=(
+            "Six-element action scale the expert was trained with (XYZ + axis-angle). Forwarded"
+            " to inverse_process_actions when --use_inverse_actions is set."
+            " Default: [0.01, 0.01, 0.002, 0.02, 0.02, 0.2]."
+        ),
+    )
+    parser.add_argument(
+        "--config_overrides",
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Extra Hydra-style overrides forwarded verbatim to ``diffusion_policy/train.py``"
+            " (e.g. ``--config_overrides policy.hidden_dim=128 policy.hidden_depth=2 policy.n_head=2``)."
+            " Applies to every training subprocess in this run."
+        ),
+    )
     args = parser.parse_args()
 
     if args.disable_task_success_filter:
@@ -413,6 +484,10 @@ if __name__ == "__main__":
                 use_kv_cache=not args.no_kv_cache,
                 kv_cache_max_seq_len=args.kv_cache_max_seq_len,
                 profile_worker=args.profile_worker,
+                use_inverse_actions=args.use_inverse_actions,
+                num_bins=args.num_bins,
+                discretize_clip_val=args.discretize_clip_val,
+                expert_action_scale=args.expert_action_scale,
             )
             raise SystemExit(0)
 
@@ -446,12 +521,36 @@ if __name__ == "__main__":
                 use_kv_cache=not args.no_kv_cache,
                 kv_cache_max_seq_len=args.kv_cache_max_seq_len,
                 profile_worker=args.profile_worker,
+                use_inverse_actions=args.use_inverse_actions,
+                num_bins=args.num_bins,
+                discretize_clip_val=args.discretize_clip_val,
+                expert_action_scale=args.expert_action_scale,
             )
             args.initial_dataset_path = dataset_path
 
         dataset_paths = [args.initial_dataset_path]
         iteration_checkpoint = None
         start_iteration = 0
+
+    eval_log_path = os.path.join(base_output_dir, "eval_log.json")
+    eval_log = IncontextEvalLog(
+        log_path=eval_log_path,
+        exp_name=exp_name,
+        config={
+            "eval_task": args.eval_task,
+            "data_task": args.data_task,
+            "insertive_object": args.insertive_object,
+            "receptive_object": args.receptive_object,
+            "num_eval_episodes": args.num_eval_episodes,
+            "num_eval_envs": args.num_eval_envs,
+            "eval_episode_length_s": eval_episode_length_s,
+            "seed": args.seed,
+            "expert_policy_checkpoint": args.expert_policy_checkpoint,
+            "wandb_project": wandb_project,
+            "base_output_dir": base_output_dir,
+        },
+    )
+    print(f"[orchestrator] writing per-iteration eval stats to {eval_log_path}")
 
     for iteration in range(start_iteration, args.max_iterations):
         print(f"Starting iteration {iteration}...")
@@ -473,10 +572,12 @@ if __name__ == "__main__":
             lr=lrs[iteration],
             seed=args.seed,
             iteration=iteration,
+            config_overrides=args.config_overrides,
         )
 
         iteration_checkpoint = _expected_train_checkpoint(train_output_dir, args.checkpoint_num)
         if not args.skip_eval:
+            iter_stats_path = os.path.join(train_output_dir, "eval_stats.json")
             eval_policy(
                 task=args.eval_task,
                 checkpoint=iteration_checkpoint,
@@ -488,7 +589,22 @@ if __name__ == "__main__":
                 no_video=args.no_video,
                 seed=args.seed,
                 transformer_mini_batch_size=args.transformer_mini_batch_size,
+                stats_output_path=iter_stats_path,
+                iteration=iteration,
             )
+            if os.path.exists(iter_stats_path):
+                eval_log.append_from_stats_file(
+                    iter_stats_path,
+                    iteration=iteration,
+                    checkpoint=iteration_checkpoint,
+                    task=args.eval_task,
+                )
+                print(f"[orchestrator] appended iteration {iteration} stats to {eval_log_path}")
+            else:
+                print(
+                    f"[orchestrator] warning: eval stats file {iter_stats_path} was not written;"
+                    f" skipping log append for iteration {iteration}."
+                )
 
         if iteration < args.max_iterations - 1:
             dataset_path = os.path.join(base_output_dir, f"dataset-iteration-{iteration + 1}")
@@ -512,5 +628,9 @@ if __name__ == "__main__":
                 use_kv_cache=not args.no_kv_cache,
                 kv_cache_max_seq_len=args.kv_cache_max_seq_len,
                 profile_worker=args.profile_worker,
+                use_inverse_actions=args.use_inverse_actions,
+                num_bins=args.num_bins,
+                discretize_clip_val=args.discretize_clip_val,
+                expert_action_scale=args.expert_action_scale,
             )
             dataset_paths.append(dataset_path)

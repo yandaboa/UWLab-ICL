@@ -117,7 +117,7 @@ class Asymmetric_DAggerRunnerCfg(Base_PPORunnerCfg):
             behavior_cloning_cfg=BehaviorCloningCfg(
                 experts_path=[""],
                 experts_loader="torch.jit.load",
-                experts_observation_group_cfg="uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.asteroid_env_cfg:PrivilegedAugmentedPolicyCfg",
+                experts_observation_group_cfg="uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.privileged_training_cfg:BasePolicyCfg",
                 experts_observation_func=my_experts_observation_func,
                 experts_action_group_cfg="uwlab_tasks.manager_based.manipulation.omnireset.config.ur5e_robotiq_2f85.actions:Ur5eRobotiq2f85RelativeOSCAction",
                 cloning_loss_coeff=1.0,

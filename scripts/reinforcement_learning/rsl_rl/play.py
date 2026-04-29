@@ -163,6 +163,7 @@ from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_che
 from isaaclab.envs.mdp.observations import last_action
 
 from uwlab_rl.rsl_rl.exporter import export_policy_as_jit, export_policy_as_onnx
+from uwlab_rl.utils.action_discretize import discretize_actions
 
 import isaaclab_tasks  # noqa: F401
 import uwlab_tasks  # noqa: F401
@@ -187,31 +188,6 @@ def set_action_override(env, actions: torch.Tensor) -> torch.Tensor:
     """Set the action override.
     """
     env.action_override = actions
-
-def discretize_actions(actions: torch.Tensor, num_bins: int, clip_val: float) -> torch.Tensor:
-    """Snap the 6 continuous arm dims to the nearest uniform bin center; threshold gripper at 0.
-
-    Args:
-        actions: Raw policy actions, shape (N, 7). Dims 0-5 are continuous arm OSC,
-                 dim 6 is the binary gripper signal.
-        num_bins: Number of uniform bins to partition [-clip_val, +clip_val] for dims 0-5.
-        clip_val: Symmetric clip range for the continuous arm dimensions.
-
-    Returns:
-        Discretized action tensor with the same shape as ``actions``.
-    """
-    result = actions.clone()
-    # Uniform bin centers in [-clip_val, +clip_val]
-    bin_centers = torch.linspace(-clip_val, clip_val, num_bins, device=actions.device, dtype=actions.dtype)
-    # Snap each continuous arm dim to nearest bin center
-    for d in range(6):
-        vals = result[:, d].clamp(-clip_val, clip_val)
-        diffs = (vals.unsqueeze(-1) - bin_centers.unsqueeze(0)).abs()
-        result[:, d] = bin_centers[diffs.argmin(dim=-1)]
-    # Gripper: threshold at 0 → {-1, +1}
-    result[:, 6] = torch.where(actions[:, 6] >= 0, torch.ones_like(actions[:, 6]), -torch.ones_like(actions[:, 6]))
-    return result
-
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
