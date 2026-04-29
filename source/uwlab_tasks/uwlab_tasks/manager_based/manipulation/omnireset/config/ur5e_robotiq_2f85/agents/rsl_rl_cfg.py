@@ -35,6 +35,8 @@ class Base_PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         activation="elu",
         noise_std_type="gsde",
         state_dependent_std=False,
+        depth_encoder_output_dim=128,
+        depth_encoder_channels=[32, 64, 128],
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
@@ -94,6 +96,8 @@ class Base_BCPPORunnerCfg(Base_PPORunnerCfg):
         activation="elu",
         noise_std_type="gsde",
         state_dependent_std=False,
+        depth_encoder_output_dim=128,
+        depth_encoder_channels=[32, 64, 128],
     )
     algorithm = RslRlFancyPpoAlgorithmCfg(
         class_name="BCPPO",

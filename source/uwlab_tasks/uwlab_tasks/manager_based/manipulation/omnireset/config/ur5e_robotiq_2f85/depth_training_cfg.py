@@ -99,18 +99,18 @@ class DepthObjectSceneCfg(RlStateSceneCfg):
 
     # replace all 3 cameras with depth readings
 
-    front_camera: MultiMeshRayCasterCameraCfg = MultiMeshRayCasterCameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot",
-        update_period=0, # this is changed in __post_init__
-        offset=front_camera_offset,
-        mesh_prim_paths=mesh_prim_paths,
-            pattern_cfg=patterns.PinholeCameraPatternCfg(
-            focal_length=13.20,
-            width=256,
-            height=256,
-        ),
-        debug_vis=False
-    )
+    # front_camera: MultiMeshRayCasterCameraCfg = MultiMeshRayCasterCameraCfg(
+    #     prim_path="{ENV_REGEX_NS}/Robot",
+    #     update_period=0, # this is changed in __post_init__
+    #     offset=front_camera_offset,
+    #     mesh_prim_paths=mesh_prim_paths,
+    #         pattern_cfg=patterns.PinholeCameraPatternCfg(
+    #         focal_length=13.20,
+    #         width=256,
+    #         height=256,
+    #     ),
+    #     debug_vis=False
+    # )
 
     side_camera: MultiMeshRayCasterCameraCfg = MultiMeshRayCasterCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot",
@@ -167,26 +167,20 @@ class DepthObjectObservationsCfg:
             },
         )
 
-        def __post_init__(self):
-            self.enable_corruption = False
-            self.concatenate_terms = False
-            self.history_length = 1
-
-    @configclass
-    class DepthObservationsCfg(ObsGroup):
-        
-        front_camera_depth = ObsTerm(
-            func=task_mdp.distance_to_camera,
-            params={"sensor_cfg": SceneEntityCfg("front_camera")},
-            noise=Unoise(n_min=-0.01, n_max=0.01),
-            clip=(0.0, 10.0),
-        )
+        # front_camera_depth = ObsTerm(
+        #     func=task_mdp.distance_to_camera,
+        #     params={"sensor_cfg": SceneEntityCfg("front_camera")},
+        #     noise=Unoise(n_min=-0.01, n_max=0.01),
+        #     clip=(0.0, 10.0),
+        #     flatten_history_dim=False,
+        # )
 
         side_camera_depth = ObsTerm(
             func=task_mdp.distance_to_camera,
             params={"sensor_cfg": SceneEntityCfg("side_camera")},
             noise=Unoise(n_min=-0.01, n_max=0.01),
             clip=(0.0, 10.0),
+            flatten_history_dim=False,
         )
 
         wrist_camera_depth = ObsTerm(
@@ -194,15 +188,46 @@ class DepthObjectObservationsCfg:
             params={"sensor_cfg": SceneEntityCfg("wrist_camera")},
             noise=Unoise(n_min=-0.01, n_max=0.01),
             clip=(0.0, 10.0),
+            flatten_history_dim=False,
         )
 
         def __post_init__(self):
             self.enable_corruption = False
             self.concatenate_terms = False
-            self.history_length = 4
+            # self.history_length = 1
+            self.flatten_history_dim = False
+
+    # @configclass
+    # class DepthObservationsCfg(ObsGroup):
+        
+    #     front_camera_depth = ObsTerm(
+    #         func=task_mdp.distance_to_camera,
+    #         params={"sensor_cfg": SceneEntityCfg("front_camera")},
+    #         noise=Unoise(n_min=-0.01, n_max=0.01),
+    #         clip=(0.0, 10.0),
+    #     )
+
+    #     side_camera_depth = ObsTerm(
+    #         func=task_mdp.distance_to_camera,
+    #         params={"sensor_cfg": SceneEntityCfg("side_camera")},
+    #         noise=Unoise(n_min=-0.01, n_max=0.01),
+    #         clip=(0.0, 10.0),
+    #     )
+
+    #     wrist_camera_depth = ObsTerm(
+    #         func=task_mdp.distance_to_camera,
+    #         params={"sensor_cfg": SceneEntityCfg("wrist_camera")},
+    #         noise=Unoise(n_min=-0.01, n_max=0.01),
+    #         clip=(0.0, 10.0),
+    #     )
+
+    #     def __post_init__(self):
+    #         self.enable_corruption = False
+    #         self.concatenate_terms = False
+    #         self.history_length = 4
     
     policy: PolicyCfg = PolicyCfg()
-    depth: DepthObservationsCfg = DepthObservationsCfg()
+    # depth: DepthObservationsCfg = DepthObservationsCfg()
     critic: ObservationsCfg.CriticCfg = ObservationsCfg.CriticCfg()
 
 
@@ -219,6 +244,6 @@ class Ur5eRobotiq2f85DepthTrainingCfg(Ur5eRobotiq2f85RlStateCfg):
 
         # TODO: for sim2real, consider matching update period with the real camera's update period
         # for now, setting it like this minimizes updating unnecessarily.
-        self.scene.front_camera.update_period = self.decimation * self.sim.dt
+        # self.scene.front_camera.update_period = self.decimation * self.sim.dt
         self.scene.side_camera.update_period = self.decimation * self.sim.dt
         self.scene.wrist_camera.update_period = self.decimation * self.sim.dt

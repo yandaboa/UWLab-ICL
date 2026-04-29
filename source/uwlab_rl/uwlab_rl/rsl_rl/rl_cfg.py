@@ -67,6 +67,12 @@ class RslRlFancyActorCriticCfg(RslRlPpoActorCriticCfg):
     noise_std_type: Literal["scalar", "log", "gsde"] = "scalar"
     """The type of noise standard deviation for the policy. Default is scalar."""
 
+    depth_encoder_output_dim: int = 128
+    """Output feature dimension for each encoded depth image."""
+
+    depth_encoder_channels: list[int] = [32, 64, 128]
+    """Convolution channels per depth encoder stage."""
+
 
 @configclass
 class RslRlFancyPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
