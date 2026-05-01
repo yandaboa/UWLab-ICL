@@ -80,3 +80,4 @@ rollouts/
 renders/
 checkpoints/
 *.pt
+plots/
