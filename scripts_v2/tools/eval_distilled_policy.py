@@ -42,7 +42,32 @@ parser.add_argument(
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
 parser.add_argument("--use_amp", action="store_true", default=False, help="Use automatic mixed precision.")
-parser.add_argument("--save_video", action="store_true", default=False, help="Save video of the policy.")
+parser.add_argument("--save_video", action="store_true", default=False, help="Save video of the policy by capturing per-step camera obs (only works on tasks with rgb camera observations or scene rgb sensors).")
+parser.add_argument(
+    "--record_viewport_video",
+    action="store_true",
+    default=False,
+    help=(
+        "Wrap the env with gym.wrappers.RecordVideo to dump viewport pixels to mp4."
+        " Independent of the task's observation space — works on proprioceptive-only eval tasks too."
+    ),
+)
+parser.add_argument(
+    "--video_length",
+    type=int,
+    default=500,
+    help="Number of env steps to capture when --record_viewport_video is set.",
+)
+parser.add_argument(
+    "--video_output_dir",
+    type=str,
+    default=None,
+    help=(
+        "Absolute path to write the viewport-recording mp4 to. If unset, falls back to the"
+        " process's launch cwd captured before Hydra changes it (Hydra's @hydra_task_compose"
+        " decorator chdir's into a per-job output dir, which is rarely what the caller wants)."
+    ),
+)
 parser.add_argument(
     "--transformer_mini_batch_size",
     type=int,
@@ -73,6 +98,12 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, remaining_args = parser.parse_known_args()
+
+# Capture the launch cwd BEFORE Hydra's @hydra_task_compose chdir's into its
+# per-job output dir. Used as the viewport-video fallback target when the user
+# didn't pass --video_output_dir explicitly.
+import os as _os_for_launch_cwd
+_LAUNCH_CWD = _os_for_launch_cwd.getcwd()
 
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
@@ -227,6 +258,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
     env_cfg.observations.policy.concatenate_terms = False
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
+
+    # Viewport recording — wraps env.render() output, independent of obs space.
+    # Use this for tasks (like *State*-StudentEval-v0) that have no rgb obs / sensors.
+    if args_cli.record_viewport_video:
+        from datetime import datetime as _dt
+        video_folder = args_cli.video_output_dir or _LAUNCH_CWD
+        os.makedirs(video_folder, exist_ok=True)
+        video_kwargs = {
+            "video_folder": video_folder,
+            "step_trigger": lambda step: step == 0,
+            "video_length": args_cli.video_length,
+            "name_prefix": f"play-{_dt.now().strftime('%Y%m%d-%H%M%S')}",
+            "disable_logger": True,
+        }
+        env = gym.wrappers.RecordVideo(env, **video_kwargs)
+        print(f"[eval] viewport video recording enabled (length={args_cli.video_length}, folder={video_folder})")
 
     policy = _load_policy(args_cli.checkpoint, device)
     wrapped_policy = DiffusionPolicyWrapper(

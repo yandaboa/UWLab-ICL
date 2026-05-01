@@ -206,15 +206,16 @@ def eval_policy(
 _STEP_CKPT_RE = re.compile(r"step_(\d+)\.ckpt$")
 
 
-def _expected_train_checkpoint(output_dir: str, step: int = 8_000) -> str:
+def _expected_train_checkpoint(output_dir: str, step: int = 50_000) -> str:
     """Resolve the checkpoint path produced by a training iteration.
 
-    Prefers ``step_{step:07d}.ckpt`` if present; otherwise falls back to the highest
-    numbered ``step_*.ckpt`` in the checkpoints dir; finally to ``latest.ckpt``. If
-    none of these are available, returns the preferred path so callers can surface a
-    useful error when they try to load it.
+    Selection order (no ``best.ckpt`` lookup — kept simple and predictable):
+      1. ``step_{step:07d}.ckpt`` for the requested step (default 50k).
+      2. The highest-numbered ``step_*.ckpt`` in the checkpoints dir.
+      3. ``latest.ckpt`` — the final-state snapshot from the workspace.
     """
     ckpt_dir = os.path.join(output_dir, "checkpoints")
+
     preferred = os.path.join(ckpt_dir, f"step_{step:07d}.ckpt")
     if os.path.exists(preferred):
         return preferred
@@ -371,7 +372,7 @@ if __name__ == "__main__":
             " DiffusionPolicyWrapper emits per-stage inference timings."
         ),
     )
-    parser.add_argument("--checkpoint_num", type=int, default=5000, help="Checkpoint number to resume from")
+    parser.add_argument("--checkpoint_num", type=int, default=50000, help="Checkpoint number to resume from / evaluate (matches step_{checkpoint_num:07d}.ckpt; falls back to highest available step_* or latest.ckpt).")
     parser.add_argument(
         "--use_inverse_actions",
         action="store_true",

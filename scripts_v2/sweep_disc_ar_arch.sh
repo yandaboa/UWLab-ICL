@@ -18,16 +18,17 @@
 #   bash scripts_v2/sweep_disc_ar_arch.sh
 #
 # Override knobs:
-#   NUM_GPUS=8 HIDDEN_DEPTHS="2 4 8" N_HEADS="2 4 8" HIDDEN_DIMS="64 128 256 512" \
+#   GPU_IDS="0 1 2 3 4 5 6 7" HIDDEN_DEPTHS="2 4 8" N_HEADS="2 4 8" HIDDEN_DIMS="64 128 256 512" \
 #     bash scripts_v2/sweep_disc_ar_arch.sh
 
 set -uo pipefail
 
 # ---- knobs ---------------------------------------------------------------
-NUM_GPUS=${NUM_GPUS:-8}
+# Default reserves GPU 7 for other experiments — override GPU_IDS to use it.
+GPU_IDS=${GPU_IDS:-"0 1 2 3 4 5 6"}
 HIDDEN_DEPTHS=${HIDDEN_DEPTHS:-"4 8 12"}
-N_HEADS=${N_HEADS:-"4 8 12"}
-HIDDEN_DIMS=${HIDDEN_DIMS:-"64 128 256 512"}
+N_HEADS=${N_HEADS:-"4 8 16"}
+HIDDEN_DIMS=${HIDDEN_DIMS:-"512"}
 
 EXPERT_CKPT=${EXPERT_CKPT:-"logs/rsl_rl/teacher/exported/policy.pt"}
 CONFIG_NAME=${CONFIG_NAME:-"in_context_adaptation_interleave.yaml"}
@@ -48,7 +49,7 @@ DISCRETIZE_CLIP_VAL=${DISCRETIZE_CLIP_VAL:-50.0}
 LOG_DIR="${OUTPUT_DIR_BASE}/sweep_logs/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "${LOG_DIR}"
 echo "[sweep] per-run logs → ${LOG_DIR}"
-echo "[sweep] sweeping hidden_depth ∈ {${HIDDEN_DEPTHS}}, n_head ∈ {${N_HEADS}}, hidden_dim ∈ {${HIDDEN_DIMS}} on ${NUM_GPUS} GPUs"
+echo "[sweep] sweeping hidden_depth ∈ {${HIDDEN_DEPTHS}}, n_head ∈ {${N_HEADS}}, hidden_dim ∈ {${HIDDEN_DIMS}} on GPUs {${GPU_IDS}}"
 echo
 
 # ---- enumerate combos (skip hidden_dim not divisible by n_head) ----------
@@ -91,7 +92,7 @@ reap_finished() {
 }
 
 free_gpu() {
-    for g in $(seq 0 $((NUM_GPUS - 1))); do
+    for g in ${GPU_IDS}; do
         if [[ -z "${gpu_pid[$g]:-}" ]]; then
             echo "$g"
             return

@@ -28,7 +28,7 @@
             "request": "attach",
             "connect": { "host": "127.0.0.1", "port": 5680 },
             "pathMappings": [
-              { "localRoot": "${workspaceFolder}", "remoteRoot": "/home/ubuntu/lti/UWLab-ICL" }
+              { "localRoot": "${workspaceFolder}", "remoteRoot": "/mnt/storage/lti/UWLab-ICL" }
             ],
             "justMyCode": false
           },
