@@ -229,6 +229,30 @@ gym.register(
     },
 )
 
+# Privileged-known-perturbation distillation: student observes ``(action_scale, action_offset)``
+# directly, isolating the BC distillation gap from the identification gap. Used by the
+# privileged-MLP / privileged-discrete-AR baselines launched from
+# ``run_incontext_exploration.py --policy_mode privileged_mlp``.
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-PrivilegedKnown-Distillation-DataCollection-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.privileged_mlp_env_cfg:Ur5eRobotiq2f85RelCartesianOSCPrivilegedKnownPerturbationDistillationCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Asymmetric_DAggerRunnerCfg",
+    },
+)
+
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-PrivilegedKnown-Distillation-StudentEval-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.privileged_mlp_env_cfg:Ur5eRobotiq2f85RelCartesianOSCPrivilegedKnownPerturbationStudentEvalCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Base_PPORunnerCfg",
+    },
+)
+
 # RGB variant: same augmented-privileged expert distilled into an image-based student.
 gym.register(
     id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-RGB-Privileged-Augmented-Distillation-DataCollection-v0",

@@ -163,6 +163,19 @@ parser.add_argument(
         "Default: [0.01, 0.01, 0.002, 0.02, 0.02, 0.2]."
     ),
 )
+parser.add_argument(
+    "--full_dagger",
+    action="store_true",
+    default=False,
+    help=(
+        "Full DAgger mode: the exploration (student) policy drives EVERY env for the full episode,"
+        " but the recorded ``actions`` field is overridden with the inverse-mapped (and possibly"
+        " discretized) expert action — the expert provides supervision at every step regardless"
+        " of who physically acted. Requires --exploration_checkpoint and is incompatible with"
+        " --disable_exploration_ratio_filter (the ratio is degenerate in this mode and the filter"
+        " is force-disabled internally)."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -472,6 +485,42 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
     )
     exploration_lengths = torch.zeros((num_envs,), device=device, dtype=torch.int32)
     recorder_manager.exploration_lengths = exploration_lengths
+
+    # Full-DAgger setup: student drives every env, but the recorded action is the inverse-mapped
+    # expert supervision. Implemented by stashing per-step expert supervision on the env and
+    # monkey-patching the actions recorder to read from there instead of the action manager.
+    full_dagger = args_cli.full_dagger
+    if full_dagger:
+        if exploration_policy is None:
+            raise SystemExit("--full_dagger requires --exploration_checkpoint to drive every env.")
+        if not use_inverse:
+            raise SystemExit(
+                "--full_dagger requires --use_inverse_actions so the expert supervision is correct"
+                " under the perturbation."
+            )
+        # Both filters off in full DAgger:
+        #   - exploration-ratio: degenerate (student drives 100% by construction).
+        #   - task-success: the env's consecutive-success termination is too strict to fire under
+        #     a moderately-trained student even when EOE/any-time success is high. The expert
+        #     label is independent of student outcome, so admitting all completed episodes keeps
+        #     the supervision correct; abnormal-robot terminations still cull crashed episodes.
+        args_cli.disable_exploration_ratio_filter = True
+        args_cli.disable_task_success_filter = True
+        actions_recorder_term = recorder_manager._terms.get("record_pre_step_actions")
+        if actions_recorder_term is None:
+            raise RuntimeError("record_pre_step_actions recorder term is not configured.")
+        env.unwrapped.expert_supervision_action = torch.zeros(
+            (num_envs, action_dim_val), device=device
+        )
+
+        def _record_expert_supervision(self):
+            return "actions", self._env.expert_supervision_action
+
+        actions_recorder_term.record_pre_step = MethodType(
+            _record_expert_supervision, actions_recorder_term
+        )
+        print("[FullDAgger] ENABLED — student drives every env; recorded action = inverse-mapped expert.")
+
     # Install gated record_pre_reset + filter config regardless of exploration, so that
     # --disable_task_success_filter (expert-only admit-all) works even when no exploration
     # policy is loaded.
@@ -508,7 +557,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
 
             # ── (2) Choose expert or exploration policy per environment ──
             episode_steps = env.unwrapped.episode_length_buf
-            use_exploration = (episode_steps < exploration_horizons) & (exploration_policy is not None)
+            if full_dagger:
+                # Student drives every env every step; the inverse-mapped expert action is recorded
+                # as supervision (see step 6 below).
+                use_exploration = torch.ones((num_envs,), dtype=torch.bool, device=device)
+            else:
+                use_exploration = (episode_steps < exploration_horizons) & (exploration_policy is not None)
             use_expert = ~use_exploration
             exploration_lengths += use_exploration.int()
             recorder_manager.exploration_lengths = exploration_lengths
@@ -545,6 +599,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
                 exploration_obs = {k: v[use_exploration] for k, v in policy_obs.items()}
                 exploration_actions = exploration_policy.predict_action(exploration_obs, exploration_env_ids)
                 actions[use_exploration] = exploration_actions.to(device)
+
+            # In full-DAgger the recorded ``actions`` field is the inverse-mapped expert action,
+            # not the student action that physically drives the env. Stash it on the env so the
+            # monkey-patched ``record_pre_step_actions`` term reads it instead of action_manager.
+            if full_dagger:
+                env.unwrapped.expert_supervision_action = env_actions.clone()
 
             # Mask actions to zero on the first step after reset (image may not yet be valid)
             first_step_mask = env.unwrapped.episode_length_buf == 0

@@ -32,6 +32,7 @@ def collect_demos(
     num_bins: int = 0,
     discretize_clip_val: float = 50.0,
     expert_action_scale: list[float] | None = None,
+    full_dagger: bool = False,
 ):
     """Spawn ``collect_demos_asteroid.py`` as a subprocess to collect a zarr dataset."""
     command = [
@@ -87,6 +88,8 @@ def collect_demos(
         command += ["--num_bins", str(num_bins), "--discretize_clip_val", str(discretize_clip_val)]
     if expert_action_scale is not None:
         command += ["--expert_action_scale", *(str(s) for s in expert_action_scale)]
+    if full_dagger:
+        command += ["--full_dagger"]
 
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -421,6 +424,16 @@ if __name__ == "__main__":
             " Applies to every training subprocess in this run."
         ),
     )
+    parser.add_argument(
+        "--full_dagger",
+        action="store_true",
+        help=(
+            "Forward to the collection subprocess: in iterations >0, the student drives every"
+            " env for the full episode and the recorded action target is the inverse-mapped"
+            " expert action (true full DAgger, not the intervention-tail variant)."
+            " Iter-0 always runs expert-only (no exploration policy yet)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.disable_task_success_filter:
@@ -489,6 +502,7 @@ if __name__ == "__main__":
                 num_bins=args.num_bins,
                 discretize_clip_val=args.discretize_clip_val,
                 expert_action_scale=args.expert_action_scale,
+                full_dagger=args.full_dagger,
             )
             raise SystemExit(0)
 
@@ -633,5 +647,6 @@ if __name__ == "__main__":
                 num_bins=args.num_bins,
                 discretize_clip_val=args.discretize_clip_val,
                 expert_action_scale=args.expert_action_scale,
+                full_dagger=args.full_dagger,
             )
             dataset_paths.append(dataset_path)
