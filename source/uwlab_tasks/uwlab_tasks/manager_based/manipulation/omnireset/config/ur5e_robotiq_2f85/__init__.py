@@ -253,6 +253,53 @@ gym.register(
     },
 )
 
+# No-perturbation distillation: same scaffolding as the augmented variant but with the
+# action-perturbation events disabled. Used as a Gaussian-head sanity check — if the
+# priv-MLP can solve this Markovian peg env, the head/training pipeline are sound.
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-NoPerturb-Distillation-DataCollection-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.privileged_mlp_noperturb_env_cfg:Ur5eRobotiq2f85RelCartesianOSCPrivilegedNoPerturbDistillationCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Asymmetric_DAggerRunnerCfg",
+    },
+)
+
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-NoPerturb-Distillation-StudentEval-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.privileged_mlp_noperturb_env_cfg:Ur5eRobotiq2f85RelCartesianOSCPrivilegedNoPerturbStudentEvalCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Base_PPORunnerCfg",
+    },
+)
+
+# Aux-loss distillation: same as Privileged-Augmented but the data_collection obs group
+# logs (action_offset, action_scale) into the zarr as aux supervision targets. The
+# student's policy obs group remains BasePolicyCfg — student never sees the perturbation
+# directly, only the aux head consumes it during training.
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-Augmented-Aux-Distillation-DataCollection-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.asteroid_aux_env_cfg:Ur5eRobotiq2f85RelCartesianOSCAuxDistillationCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Asymmetric_DAggerRunnerCfg",
+    },
+)
+
+gym.register(
+    id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-Augmented-Aux-Distillation-StudentEval-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.asteroid_aux_env_cfg:Ur5eRobotiq2f85RelCartesianOSCAuxStudentEvalCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_cfg:Base_PPORunnerCfg",
+    },
+)
+
 # RGB variant: same augmented-privileged expert distilled into an image-based student.
 gym.register(
     id="OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-RGB-Privileged-Augmented-Distillation-DataCollection-v0",
