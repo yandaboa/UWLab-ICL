@@ -42,17 +42,27 @@ if str(_REPO_ROOT) not in sys.path:
 
 from diffusion_policy.workspace.base_workspace import BaseWorkspace  # noqa: E402
 
-PLOT_OUT = _REPO_ROOT / "plots" / "priv_baseline" / "gaussian_vs_discrete_at_state.png"
+PLOT_OUT = _REPO_ROOT / "plots" / "priv_baseline" / "gaussian_vs_discrete_at_state_v8_vs_r4.png"
 PLOT_OUT.parent.mkdir(parents=True, exist_ok=True)
 
+# ``PRIV_MLP_RUN`` is the latest valid Gaussian-MLP policy (v8, bug-fixed
+# compute_loss + corrected env on PrivilegedTrainCfg). ``MARK_DISC_RUN`` is the
+# non-privileged disc-AR baseline (r4) — same shape_meta keys (BasePolicyCfg)
+# so both policies' normalizers will filter out anything from the dataset they
+# don't recognize.
 PRIV_MLP_RUN = (
-    _REPO_ROOT / "logs/priv_baseline/r1_priv_mlp_bc20k_d1024"
-    "/priv_baseline_r1_priv_mlp_bc20k_d1024"
+    _REPO_ROOT / "logs/priv_baseline/a_priv_mlp_noperturb_d2048_50k_v8"
+    "/priv_baseline_a_priv_mlp_noperturb_d2048_50k_v8"
 )
 MARK_DISC_RUN = (
     _REPO_ROOT / "logs/priv_baseline/r4_mark_disc_bc80k_d512"
     "/priv_baseline_r4_mark_disc_bc80k_d512"
 )
+# Use r1's zarr for bucketing: it has ``action_offset`` and ``action_scale``
+# obs keys (from the PrivilegedKnown augmented env), needed to bucket by
+# (state, perturbation) and find a high-empirical-std state where multimodality
+# is actually present in the data. The state's BasePolicyCfg keys also feed
+# both policies.
 PRIV_MLP_DATASET = (
     _REPO_ROOT / "logs/priv_baseline/r1_priv_mlp_bc20k_d256"
     "/priv_baseline_r1_priv_mlp_bc20k_d256/2026-05-02_07-29-07"
