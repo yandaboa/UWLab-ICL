@@ -1,0 +1,27 @@
+[
+  {
+    "tag": "a_priv_mlp_noperturb_d2048_50k_v5",
+    "cmd": [
+      "python", "run_incontext_exploration.py",
+      "--expert_policy_checkpoint", "logs/rsl_rl/teacher/exported/policy.pt",
+      "--data_task", "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-NoPerturb-Distillation-DataCollection-v0",
+      "--eval_task", "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Privileged-NoPerturb-Distillation-StudentEval-v0",
+      "--config_name", "in_context_privileged_mlp_noperturb.yaml",
+      "--exp_name", "priv_baseline_a_priv_mlp_noperturb_d2048_50k_v5",
+      "--wandb_project", "incontext_priv_baseline",
+      "--output_dir", "logs/priv_baseline/a_priv_mlp_noperturb_d2048_50k_v5",
+      "--num_demos", "50000",
+      "--num_data_envs", "2048",
+      "--num_eval_envs", "64",
+      "--num_eval_episodes", "512",
+      "--max_iterations", "1",
+      "--insertive_object", "peg",
+      "--receptive_object", "peghole",
+      "--no_video",
+      "--use_inverse_actions",
+      "--discretize_clip_val", "2.0",
+      "--config_overrides", "training.max_gradient_steps=200000", "training.num_epochs=200", "policy.hidden_dim=2048", "policy.hidden_depth=6"
+    ],
+    "max_retries": 1
+  }
+]
