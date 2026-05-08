@@ -10,7 +10,9 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
 from uwlab_rl.rsl_rl.rl_cfg import (
     BehaviorCloningCfg,
+    DiscriminatorTrainingCfg,
     OffPolicyAlgorithmCfg,
+    RslRlDiversityPpoAlgorithmCfg,
     RslRlFancyActorCriticCfg,
     RslRlFancyPpoAlgorithmCfg,
 )
@@ -34,8 +36,8 @@ class Base_PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         init_noise_std=1.0,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
-        # actor_hidden_dims=[512, 256, 128, 64],
-        actor_hidden_dims=[1024, 512, 256, 128],
+        actor_hidden_dims=[512, 256, 128, 64],
+        # actor_hidden_dims=[1024, 512, 256, 128],
         # actor_hidden_dims=[1024, 512, 512, 256, 128],
         privileged_obs_encoder_dims=[256, 128, 64],
         use_privileged_obs_encoder=False,
@@ -93,6 +95,53 @@ class Base_DAggerRunnerCfg(Base_PPORunnerCfg):
                 cloning_loss_coeff=1.0,
                 loss_decay=1.0,
             )
+        ),
+    )
+
+
+@configclass
+class Diversity_PPORunnerCfg(Base_PPORunnerCfg):
+    """PPO + DIAYN skill discriminator. Routed through the DiversityRunner.
+
+    The number of skills here must match ``NUM_SKILLS`` in ``rl_state_cfg.py`` (the env-side
+    skill obs term reads its own copy of the alphabet size from its params).
+    """
+
+    class_name: str = "DiversityRunner"
+    experiment_name = "ur5e_robotiq_2f85_omnireset_diversity"
+    algorithm = RslRlDiversityPpoAlgorithmCfg(
+        # PPO knobs (mirror Base_PPORunnerCfg.algorithm)
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        normalize_advantage_per_mini_batch=False,
+        clip_param=0.2,
+        entropy_coef=0.006,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+        weight_decay=0.0,
+        # Diversity knobs
+        number_of_skills=10,
+        skill_obs_key="skill",
+        discriminator_cfg=DiscriminatorTrainingCfg(
+            learning_rate=3.0e-4,
+            weight_decay=0.01,
+            num_mini_batches=4,
+            num_learning_epochs=1,
+            update_frequency=4,
+            max_grad_norm=1.0,
+            hidden_dims=[256, 256, 256],
+            activation="elu",
+            obs_normalization=True,
+            obs_group="discriminator_obs",
+            reward_scale=0.2,
+            use_log_prior=True,
+            label_smoothing=0.0,
         ),
     )
 

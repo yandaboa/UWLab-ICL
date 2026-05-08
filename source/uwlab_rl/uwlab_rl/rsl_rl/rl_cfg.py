@@ -56,6 +56,55 @@ class OffPolicyAlgorithmCfg:
     behavior_cloning_cfg: BehaviorCloningCfg | None = None
     """The configuration for the offline behavior cloning(dagger)."""
 
+@configclass
+class DiscriminatorTrainingCfg:
+    """Configuration for the DIAYN-style discriminator q(z | s).
+
+    Trained with cross-entropy to predict the skill index from the next state. Hyperparameters
+    cover both the network parameterization and the optimisation schedule.
+    """
+
+    # -- Optimiser
+    learning_rate: float = 1.0e-3
+    """Adam learning rate for the discriminator."""
+
+    weight_decay: float = 0.0
+    """Weight decay for the discriminator optimiser."""
+
+    num_mini_batches: int = 4
+    """Mini-batches per update (rollout is split into this many minibatches per epoch)."""
+
+    num_learning_epochs: int = 4
+    """Epochs over the rollout per discriminator update."""
+
+    update_frequency: int = 1
+    """How often (in PPO updates) to run the discriminator update. 1 = every PPO update."""
+
+    max_grad_norm: float = 1.0
+    """Gradient clip for the discriminator."""
+
+    # -- Network parameterization
+    hidden_dims: list[int] = [256, 256]
+    """MLP hidden sizes for q(z | s)."""
+
+    activation: str = "elu"
+    """Activation function for the discriminator MLP."""
+
+    obs_normalization: bool = True
+    """Whether to apply EmpiricalNormalization to the discriminator input."""
+
+    obs_group: str = "discriminator_obs"
+    """Observation group fed into the discriminator (s_{t+1})."""
+
+    # -- Reward shaping
+    reward_scale: float = 1.0
+    """Multiplier on the diversity bonus before it is added to the env reward."""
+
+    use_log_prior: bool = True
+    """If True, the bonus is log q(z|s) - log p(z) (DIAYN). If False, just log q(z|s)."""
+
+    label_smoothing: float = 0.0
+    """Optional CE label smoothing for stability when q is overconfident."""
 
 @configclass
 class RslRlFancyActorCriticCfg(RslRlPpoActorCriticCfg):
@@ -91,3 +140,19 @@ class RslRlFancyPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
     weight_decay: float = 0.0
     """The weight decay for the optimizer."""
+
+@configclass
+class RslRlDiversityPpoAlgorithmCfg(RslRlFancyPpoAlgorithmCfg):
+    """PPO + DIAYN-style skill discriminator."""
+
+    class_name: str = "DiversityPPO"
+    """Algorithm class resolved by the runner. Maps to ``rsl_rl.algorithms.DiversityPPO``."""
+
+    discriminator_cfg: DiscriminatorTrainingCfg = DiscriminatorTrainingCfg()
+    """Discriminator network + training configuration."""
+
+    number_of_skills: int = 10
+    """Size of the skill alphabet ``z``. Skills are sampled uniformly per-episode."""
+
+    skill_obs_key: str = "skill"
+    """Name of the per-term skill observation in the policy obs group."""

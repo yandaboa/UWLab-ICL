@@ -1,0 +1,27 @@
+[
+  {
+    "tag": "r2_priv_mlp_bc80k_d1024_rerun",
+    "cmd": [
+      "python", "run_incontext_exploration.py",
+      "--expert_policy_checkpoint", "logs/rsl_rl/teacher/exported/policy.pt",
+      "--data_task", "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-PrivilegedKnown-Distillation-DataCollection-v0",
+      "--eval_task", "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-PrivilegedKnown-Distillation-StudentEval-v0",
+      "--config_name", "in_context_privileged_mlp.yaml",
+      "--exp_name", "priv_baseline_r2_priv_mlp_bc80k_d1024_rerun",
+      "--wandb_project", "incontext_priv_baseline",
+      "--output_dir", "logs/priv_baseline/r2_priv_mlp_bc80k_d1024_rerun",
+      "--num_demos", "80000",
+      "--num_data_envs", "1024",
+      "--num_eval_envs", "64",
+      "--num_eval_episodes", "512",
+      "--max_iterations", "1",
+      "--insertive_object", "peg",
+      "--receptive_object", "peghole",
+      "--no_video",
+      "--use_inverse_actions",
+      "--discretize_clip_val", "2.0",
+      "--config_overrides", "training.max_gradient_steps=200000", "training.num_epochs=200", "policy.hidden_dim=1024", "policy.hidden_depth=6"
+    ],
+    "max_retries": 1
+  }
+]

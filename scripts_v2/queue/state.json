@@ -1,5 +1,5 @@
 {
-  "pending_offset": 13,
+  "pending_offset": 25,
   "running": [],
   "completed": [
     {
@@ -89,6 +89,38 @@
       "log": "/mnt/storage/lti/UWLab-ICL/logs/queue/2026-05-03_10-27-40/a_priv_mlp_noperturb_d1024_v2.log",
       "elapsed_s": 17430,
       "finished": "2026-05-04_04-23-42"
+    },
+    {
+      "tag": "a_priv_mlp_noperturb_d1024_v3_fix",
+      "gpu": 1,
+      "rc": 0,
+      "log": "/mnt/storage/lti/UWLab-ICL/logs/queue/2026-05-03_10-27-40/a_priv_mlp_noperturb_d1024_v3_fix.log",
+      "elapsed_s": 4620,
+      "finished": "2026-05-05_10-06-44"
+    },
+    {
+      "tag": "a_priv_mlp_noperturb_d2048_50k_v8",
+      "gpu": 3,
+      "rc": 0,
+      "log": "/mnt/storage/lti/UWLab-ICL/logs/queue/2026-05-03_10-27-40/a_priv_mlp_noperturb_d2048_50k_v8.log",
+      "elapsed_s": 6840,
+      "finished": "2026-05-06_14-45-20"
+    },
+    {
+      "tag": "r2_priv_mlp_bc80k_d1024_rerun",
+      "gpu": 5,
+      "rc": 0,
+      "log": "/mnt/storage/lti/UWLab-ICL/logs/queue/2026-05-03_10-27-40/r2_priv_mlp_bc80k_d1024_rerun.log",
+      "elapsed_s": 11280,
+      "finished": "2026-05-06_16-00-50"
+    },
+    {
+      "tag": "full_dagger_l8h16d512_4iters_20k",
+      "gpu": 2,
+      "rc": 0,
+      "log": "/mnt/storage/lti/UWLab-ICL/logs/queue/2026-05-03_10-27-40/full_dagger_l8h16d512_4iters_20k.log",
+      "elapsed_s": 19321,
+      "finished": "2026-05-06_16-44-20"
     }
   ],
   "failed": [
@@ -99,7 +131,39 @@
       "log": "/mnt/storage/lti/UWLab-ICL/logs/queue/2026-05-03_10-27-40/a_priv_mlp_noperturb_d1024.log",
       "elapsed_s": 240,
       "finished": "2026-05-03_23-35-42"
+    },
+    {
+      "tag": "a_priv_mlp_noperturb_d2048_50k_v4",
+      "gpu": 2,
+      "rc": -15,
+      "log": "/mnt/storage/lti/UWLab-ICL/logs/queue/2026-05-03_10-27-40/a_priv_mlp_noperturb_d2048_50k_v4.log",
+      "elapsed_s": 8310,
+      "finished": "2026-05-06_09-11-17"
+    },
+    {
+      "tag": "a_priv_mlp_noperturb_d2048_50k_v5",
+      "gpu": 2,
+      "rc": -15,
+      "log": "/mnt/storage/lti/UWLab-ICL/logs/queue/2026-05-03_10-27-40/a_priv_mlp_noperturb_d2048_50k_v5.log",
+      "elapsed_s": 420,
+      "finished": "2026-05-06_09-30-18"
+    },
+    {
+      "tag": "a_priv_mlp_noperturb_d2048_50k_v6",
+      "gpu": 3,
+      "rc": -15,
+      "log": "/mnt/storage/lti/UWLab-ICL/logs/queue/2026-05-03_10-27-40/a_priv_mlp_noperturb_d2048_50k_v6.log",
+      "elapsed_s": 960,
+      "finished": "2026-05-06_12-15-19"
+    },
+    {
+      "tag": "a_priv_mlp_noperturb_d2048_50k_v7",
+      "gpu": 3,
+      "rc": -9,
+      "log": "/mnt/storage/lti/UWLab-ICL/logs/queue/2026-05-03_10-27-40/a_priv_mlp_noperturb_d2048_50k_v7.log",
+      "elapsed_s": 90,
+      "finished": "2026-05-06_12-50-49"
     }
   ],
-  "updated": "2026-05-05_07-41-14"
+  "updated": "2026-05-08_03-08-23"
 }

@@ -36,6 +36,25 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--num_steps", type=int, default=None, help="Number of steps to simulate.")
+parser.add_argument(
+    "--skill",
+    type=int,
+    default=None,
+    help=(
+        "Force every env to this skill index (Diversity tasks only). Sets "
+        "env.observations.policy.skill.params.force_skill and tags the video filename."
+    ),
+)
+parser.add_argument(
+    "--action_rescale",
+    action="store_true",
+    default=False,
+    help=(
+        "Apply the hard-coded inverse-action rescale to the finetune-eval action scale "
+        "[0.01, 0.01, 0.002, 0.02, 0.02, 0.2]. Off by default; pass this only for policies "
+        "trained at those scales (Stage-2 / finetune-eval)."
+    ),
+)
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument(
     "--num_bins",
@@ -58,6 +77,12 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="If set, save rollout policy observations and actions to log_dir/rollouts/play/<timestamp>.pt.",
+)
+parser.add_argument(
+    "--save_ee_traj",
+    action="store_true",
+    default=False,
+    help="If set, save per-step world-frame end-effector position (wrist_3_link) to log_dir/rollouts/play/ee_traj-<tag>.pt.",
 )
 parser.add_argument(
     "--save_rollout_steps",
@@ -145,7 +170,7 @@ import time
 import torch
 from tqdm import tqdm
 
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+from rsl_rl.runners import DistillationRunner, DiversityRunner, OnPolicyRunner
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -222,6 +247,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
+    # Optional: lock every env to a single skill (Diversity tasks only).
+    if args_cli.skill is not None:
+        skill_term = getattr(getattr(env_cfg.observations, "policy", None), "skill", None)
+        if skill_term is None:
+            raise ValueError(
+                "--skill was passed but env_cfg.observations.policy has no 'skill' term. "
+                "Use a Diversity-* task."
+            )
+        skill_term.params["force_skill"] = int(args_cli.skill)
+
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
@@ -251,11 +286,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap for video recording
     if args_cli.video:
         video_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        skill_tag = f"-skill{args_cli.skill}" if args_cli.skill is not None else ""
         video_kwargs = {
             "video_folder": os.path.join(log_dir, "videos", "play"),
             "step_trigger": lambda step: step == 0,
             "video_length": args_cli.video_length,
-            "name_prefix": f"play-{video_timestamp}",
+            "name_prefix": f"play{skill_tag}-{video_timestamp}",
             "disable_logger": True,
         }
         print("[INFO] Recording videos during training.")
@@ -277,6 +313,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "DiversityRunner":
+        runner = DiversityRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     # play only needs the actor for inference, so we skip loading the critic and its
@@ -294,6 +332,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     runner.alg.policy.load_state_dict(actor_only_state_dict, strict=False)
     if "iter" in loaded_dict:
         runner.current_learning_iteration = loaded_dict["iter"]
+
+    # If this is a Diversity run, also load the discriminator weights from the same
+    # checkpoint and re-publish on the env so the diversity reward term works.
+    if isinstance(runner, DiversityRunner) and "discriminator_state_dict" in loaded_dict:
+        runner.alg.discriminator.load_state_dict(loaded_dict["discriminator_state_dict"])
+        runner.alg.attach_env(env)
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
@@ -354,6 +398,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "task": args_cli.task,
             "checkpoint": str(resume_path),
         }
+
+    ee_traj_buf = None
+    ee_body_idx = None
+    ee_traj_save_path = None
+    if args_cli.save_ee_traj:
+        robot = env.unwrapped.scene["robot"]
+        ee_body_idx = robot.body_names.index("wrist_3_link")
+        ee_traj_buf = []
+        ee_tag = time.strftime("%Y%m%d-%H%M%S")
+        if args_cli.skill is not None:
+            ee_tag = f"skill{args_cli.skill}-{ee_tag}"
+        ee_traj_save_path = Path(log_dir) / "rollouts" / "play" / f"ee_traj-{ee_tag}.pt"
+
     # infer a finite horizon for progress reporting when available
     progress_total = None
     if args_cli.video:
@@ -384,15 +441,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # rescale actions, this solves for action scale + offset changes.
             # remove this line if you dont want to compensate for action scale + offset for the policy automatically
             set_action_override(env.unwrapped, actions.clone())
-            actions = get_perturbed_env_solving_actions(env.unwrapped, actions)
+            if args_cli.action_rescale:
+                actions = get_perturbed_env_solving_actions(env.unwrapped, actions)
             if args_cli.num_bins > 0:
                 actions = discretize_actions(actions, args_cli.num_bins, args_cli.discretize_clip_val)
 
             # env stepping
             obs, rewards, dones, _ = env.step(actions)
+            if ee_traj_buf is not None:
+                ee_traj_buf.append(
+                    env.unwrapped.scene["robot"].data.body_pos_w[:, ee_body_idx, :].detach().cpu().clone()
+                )
             if dones.any():
                 num_episodes += dones.sum().item()
-                num_successes += torch.logical_and(rewards > 0.1, dones).sum().item() 
+                num_successes += torch.logical_and(rewards > 0.1, dones).sum().item()
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
         
@@ -426,6 +488,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         rollout_data["dt"] = dt
         torch.save(rollout_data, rollout_save_path)
         print(f"[INFO] Saved rollout to: {rollout_save_path}")
+
+    if ee_traj_buf is not None and ee_traj_save_path is not None:
+        ee_traj_save_path.parent.mkdir(parents=True, exist_ok=True)
+        ee_traj_tensor = torch.stack(ee_traj_buf, dim=0)
+        torch.save(
+            {
+                "ee_pos_w": ee_traj_tensor,
+                "task": args_cli.task,
+                "checkpoint": str(resume_path),
+                "skill": args_cli.skill,
+                "dt": dt,
+            },
+            ee_traj_save_path,
+        )
+        print(f"[INFO] Saved EE trajectory to: {ee_traj_save_path}  shape={tuple(ee_traj_tensor.shape)}")
 
     print(f"Number of episodes: {num_episodes}")
     print(f"Number of successes: {num_successes}")

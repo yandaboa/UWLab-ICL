@@ -40,6 +40,34 @@ from .privileged_training_cfg import (
 
 
 @configclass
+class NoPerturbDataCollectionEventsCfg(RandomizeGainsTrainEventsCfg):
+    """Data-collection event cfg: same gain randomization as the training env, but the
+    reset distribution is restricted to the 3 grasped-EE paths (matching
+    ``AsteroidDataCollectionEventCfg`` minus the augmentation handler).
+
+    The 4-path TrainEventCfg distribution that PrivilegedTrainCfg inherits includes
+    ``ObjectAnywhereEEAnywhere`` (peg on table, EE elsewhere, neither grasped). That
+    reset path empirically deadlocked Isaac Sim mid-collection — multiple v* runs
+    hung for hours after a few thousand demos. Dropping it (mirroring what the
+    augmented data-collection env already does) avoids the hang."""
+
+    reset_from_reset_states = EventTerm(
+        func=task_mdp.MultiResetManager,
+        mode="reset",
+        params={
+            "dataset_dir": f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/OmniReset",
+            "reset_types": [
+                "ObjectRestingEEGrasped",
+                "ObjectAnywhereEEGrasped",
+                "ObjectPartiallyAssembledEEGrasped",
+            ],
+            "probs": [0.4, 0.3, 0.3],
+            "success": "env.reward_manager.get_term_cfg('progress_context').func.success",
+        },
+    )
+
+
+@configclass
 class NoPerturbStudentEvalEventsCfg(RandomizeGainsTrainEventsCfg):
     """Eval-time event cfg: same gain randomization as the training env, but the
     reset distribution is restricted to a single canonical reset type
@@ -68,6 +96,7 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedNoPerturbDistillationCfg(
     sees BasePolicyCfg, data_collection and expert_obs both record BasePolicyCfg, no
     privileged critic. Success terminations cause successful episodes to end early."""
 
+    events: NoPerturbDataCollectionEventsCfg = NoPerturbDataCollectionEventsCfg()
     observations: AsteroidDistillationObservationsCfg = AsteroidDistillationObservationsCfg()
 
     def __post_init__(self):

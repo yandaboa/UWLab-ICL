@@ -8,6 +8,7 @@ from isaaclab.envs.mdp import *
 from uwlab.envs.mdp import *
 
 from .commands_cfg import *
+from .diversity import *
 from .events import *
 from .observations import *
 from .recorders import *

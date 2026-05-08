@@ -55,19 +55,38 @@ that bug, not the head architecture.
    edge of statistical significance — be careful inferring trends from single
    iters.
 
-## Invalid (excluded) runs — to be re-run with the bug-fixed Gaussian MLP
+## Invalid (excluded) runs — original buggy `MLPImagePolicy.compute_loss`
+
+These all hit the "only `(o_0, a_0)` of each episode trained on" bug. **Bug fixed
+2026-05-05** (use all timesteps with mask, mirroring disc-AR).
 
 | run | env | priv obs? | demos | original (buggy) result |
 |---|---|---|---|---|
-| r1 priv-MLP BC d=256 | augmented | yes | 20k | 0.0 / 0.0 |
-| r1 priv-MLP BC d=512 | augmented | yes | 20k | 0.0 / 0.0 |
-| r1 priv-MLP BC d=1024 | augmented | yes | 20k | 0.0 / 0.0 |
-| r2 priv-MLP BC d=256 | augmented | yes | 80k | 0.0 / 0.0 |
-| r2 priv-MLP BC d=512 | augmented | yes | 80k | 0.0 / 0.0 |
-| r2 priv-MLP BC d=1024 | augmented | yes | 80k | 0.0 / 0.0 |
-| r3 priv-MLP DAgger d=256 | augmented | yes | DAgger | killed mid-iter (also bug) |
+| r1 priv-MLP BC d={256,512,1024} | augmented | yes | 20k | 0.0 / 0.0 (all) |
+| r2 priv-MLP BC d={256,512,1024} | augmented | yes | 80k | 0.0 / 0.0 (all) |
+| r3 priv-MLP DAgger d=256 | augmented | yes | DAgger | killed mid-iter |
 | A v2 priv-MLP no-perturb d=1024 | no-perturb | n/a | 80k | 0.0 / 0.0 |
-| A v3-fix priv-MLP no-perturb d=1024 | no-perturb (wrong cfg) | n/a | 20k | 1.7 / 1.8 |
+| A v3-fix priv-MLP no-perturb d=1024 | broken NoPerturb cfg | n/a | 20k | 1.7 / 1.8 (env wrong) |
 
-Currently in flight: **A v6 — priv-MLP no-perturb, d=2048, 50k demos, env rebuilt
-on PrivilegedTrainCfg with `--num_data_envs 4096`.**
+## Bug-fixed Gaussian-MLP runs (2026-05-06)
+
+After fixing `compute_loss` to train on all T timesteps with `expert_mask × attention_mask`:
+
+| run | env | priv obs? | demos | EOE / any-time | takeaway |
+|---|---|---|---|---|---|
+| **A v8** priv-MLP d=2048 | NoPerturb (rewritten on PrivilegedTrainCfg, ObjectAnywhereEEAnywhere reset dropped) | n/a | 50k | **0.1 / 0.2** | catastrophic failure despite NLL=-28 deep convergence; root cause = action outliers (dim 2 max=90,722) poison `LinearNormalizer(mode=limits)`, normalized actions collapse to ±4e-4 region → tiny inference errors blow up to ~270-unit-magnitude actions, slamming robot at force_norm=9080N. fix: clip actions to ±50 before saving zarr (disc-AR pipeline already does this via `--num_bins 100 --discretize_clip_val 50.0`). |
+| **r2_rerun** priv-MLP d=1024 | augmented (PrivilegedKnown), priv obs in input | yes | 80k | **64.3 / 89.5** | Gaussian-MLP head WORKS — only ~10 pp under disc-AR mark-disc baseline (74.6 %). Action outliers in this env's zarr appear less catastrophic, possibly because perturbation distribution averages out the inverse-mapping extremes, or because privileged obs gives the policy enough closed-loop correction signal to absorb normalizer imprecision. |
+
+## Full DAgger (l8h16d512, 4×20k demos, AUGMENTED env, no priv obs) — 2026-05-06
+
+```
+iter0: EOE = 52.5 %, any = 72.0 %     (BC on 20k expert demos)
+iter1: EOE = 64.4 %, any = 74.4 %     (+12 pp EOE — first full-DAgger iter)
+iter2: EOE = 62.7 %, any = 76.5 %     (slight EOE regression, any-time still climbs)
+iter3: in flight (collection done, training in progress)
+```
+
+Implementation verified working: `[FullDAgger] ENABLED — student drives every env;
+recorded action = inverse-mapped expert.` Both filters auto-disabled by design.
+Best EOE so far (64.4 %) is ~10 pp under the priv-disc DAgger 80.1 % headline,
+and ~10 pp under the r4 mark-disc BC baseline of 74.6 %.

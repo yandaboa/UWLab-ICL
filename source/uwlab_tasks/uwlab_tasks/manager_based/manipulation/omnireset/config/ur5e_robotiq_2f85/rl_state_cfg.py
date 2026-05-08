@@ -726,6 +726,137 @@ class Ur5eRobotiq2f85RelCartesianOSCTrainCfg(Ur5eRobotiq2f85RlStateCfg):
     actions: Ur5eRobotiq2f85RelativeOSCAction = Ur5eRobotiq2f85RelativeOSCAction()
 
 
+# ----------------------------------------------------------------------------------------------
+# Diversity (DIAYN) variant: same Stage-1 training env, plus a per-episode skill index, an extra
+# discriminator obs group (= base policy state, no skill leakage), and a diversity reward term
+# that calls the algorithm-owned q(z | s_{t+1}) discriminator. The number of skills is centrally
+# defined via NUM_SKILLS so the obs term + agent cfg agree.
+# ----------------------------------------------------------------------------------------------
+
+NUM_SKILLS = 10
+
+
+@configclass
+class DiversityObservationsCfg(ObservationsCfg):
+    """Adds (a) a one-hot skill term to PolicyCfg and (b) a separate discriminator obs group."""
+
+    @configclass
+    class PolicyCfg(ObservationsCfg.PolicyCfg):
+        skill = ObsTerm(
+            func=task_mdp.SkillObs,  # type: ignore
+            # ``force_skill`` defaults to -1 (uniform random sampling on reset). At eval time
+            # set ``env.observations.policy.skill.params.force_skill=<idx>`` to lock every env
+            # to a single skill; ``play.py --skill <idx>`` is a thin wrapper that does this.
+            params={"num_skills": NUM_SKILLS, "force_skill": -1},
+        )
+
+    @configclass
+    class DiscriminatorObsCfg(ObsGroup):
+        """State fed into q(z | s). Mirrors PolicyCfg minus the skill (no leakage) and minus
+        history/noise (the discriminator should see the raw current state)."""
+
+        joint_pos = ObsTerm(func=task_mdp.joint_pos)
+
+        joint_vel = ObsTerm(func=task_mdp.joint_vel)
+
+        end_effector_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        end_effector_vel_lin_ang_b = ObsTerm(
+            func=task_mdp.asset_link_velocity_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+        insertive_asset_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("insertive_object"),
+                "root_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        receptive_asset_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("receptive_object"),
+                "root_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        insertive_asset_in_receptive_asset_frame: ObsTerm = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("insertive_object"),
+                "root_asset_cfg": SceneEntityCfg("receptive_object"),
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+            self.history_length = 1
+
+    @configclass
+    class DiversityMetaCfg(ObsGroup):
+        """Auxiliary per-env metadata for the diversity algorithm — currently the post-success
+        latch. Not consumed by the actor/critic; carried in the rollout storage so the
+        discriminator can mask post-success transitions out of its CE update.
+        """
+
+        task_done = ObsTerm(func=task_mdp.diversity_task_done_obs)
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+            self.history_length = 1
+
+    policy: PolicyCfg = PolicyCfg()
+    discriminator_obs: DiscriminatorObsCfg = DiscriminatorObsCfg()
+    diversity_meta: DiversityMetaCfg = DiversityMetaCfg()
+
+
+@configclass
+class DiversityRewardsCfg(RewardsCfg):
+    diversity = RewTerm(
+        func=task_mdp.DiversityReward,  # type: ignore
+        weight=1.0,
+        params={"obs_group": "discriminator_obs"},
+    )
+
+
+@configclass
+class Ur5eRobotiq2f85RelCartesianOSCDiversityTrainCfg(Ur5eRobotiq2f85RelCartesianOSCTrainCfg):
+    """Stage-1 training config + DIAYN skill conditioning and diversity reward."""
+
+    observations: DiversityObservationsCfg = DiversityObservationsCfg()
+    rewards: DiversityRewardsCfg = DiversityRewardsCfg()
+
+
+@configclass
+class Ur5eRobotiq2f85RelCartesianOSCDiversityPlayCfg(Ur5eRobotiq2f85RelCartesianOSCDiversityTrainCfg):
+    """Eval-time variant of the diversity training env.
+
+    Same skill conditioning as the train cfg, but with the Stage-1 ``-Play-v0`` event set
+    (single ObjectAnywhereEEAnywhere reset path, no sysid DR / OSC-gain randomization). Combine
+    with ``env.observations.policy.skill.params.force_skill=<idx>`` (or ``play.py --skill``) to
+    lock every env to a single skill for inspection.
+    """
+
+    events: TrainEvalEventCfg = TrainEvalEventCfg()
+
+
 # Finetune configuration (Stage 2: explicit actuator, curriculum ramps sysid + gains + scales)
 @configclass
 class Ur5eRobotiq2f85RelCartesianOSCFinetuneCfg(Ur5eRobotiq2f85RlStateCfg):
@@ -747,6 +878,11 @@ class Ur5eRobotiq2f85RelCartesianOSCEvalCfg(Ur5eRobotiq2f85RlStateCfg):
 
     events: TrainEvalEventCfg = TrainEvalEventCfg()
     actions: Ur5eRobotiq2f85RelativeOSCAction = Ur5eRobotiq2f85RelativeOSCAction()
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.terminations.success = DoneTerm(func=task_mdp.consecutive_success_state, params={"num_consecutive_successes": 10})
 
 
 # Evaluation configuration (after Stage 2: explicit actuator, stiff gains, fixed sysid)
