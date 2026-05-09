@@ -667,14 +667,15 @@ class RandomizeContactDynamicsEvalEventsCfg(RandomizeContactDynamicsTrainEventsC
 
 @configclass
 class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesianOSCTrainCfg):
-    """Privileged observation training configuration for the UR5e + Robotiq 2F-85 robot."""
+    """training configuration for wide randomization of the UR5e + Robotiq 2F-85 robot."""
 
     events: RandomizeGainsTrainEventsCfg = RandomizeGainsTrainEventsCfg()
 
     def __post_init__(self):
         super().__post_init__()
 
-        self.observations.policy = BasePolicyCfg()
+        self.observations.policy = ObservationsCfg.PolicyCfg()
+        # self.observations.policy = BasePolicyCfg()
         # self.observations.policy = PrivilegedPolicyCfg()
         self.observations.critic = PrivilegedCriticCfg()
         self.scene.robot = EXPLICIT_UR5E_ROBOTIQ_2F85.replace(prim_path="{ENV_REGEX_NS}/Robot")
