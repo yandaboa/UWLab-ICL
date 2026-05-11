@@ -145,6 +145,18 @@ parser.add_argument(
         "together with the same counterfactual value."
     ),
 )
+parser.add_argument(
+    "--jit_policy",
+    action="store_true",
+    default=False,
+    help="Use the JIT policy.",
+)
+parser.add_argument(
+    "--non_deterministic",
+    action="store_true",
+    default=False,
+    help="Use the deterministic policy.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -187,8 +199,21 @@ from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_che
 
 from isaaclab.envs.mdp.observations import last_action
 
+from tensordict import TensorDict
+
 from uwlab_rl.rsl_rl.exporter import export_policy_as_jit, export_policy_as_onnx
 from uwlab_rl.utils.action_discretize import discretize_actions
+
+
+def _flatten_policy_obs(obs):
+    """Match ActorCritic.get_actor_obs: when ``policy`` is a nested TensorDict
+    (concatenate_terms=False), concat sub-obs along the last dim in the order
+    the ObservationsCfg defined them. The JIT-exported actor only sees the
+    post-flatten tensor, so we replicate that step here for the JIT path."""
+    policy_obs = obs["policy"]
+    if isinstance(policy_obs, TensorDict):
+        return torch.cat([policy_obs[k] for k in policy_obs.keys()], dim=-1)
+    return policy_obs
 
 import isaaclab_tasks  # noqa: F401
 import uwlab_tasks  # noqa: F401
@@ -307,80 +332,86 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO]: Action discretization ENABLED — {args_cli.num_bins} bins, clip_val={args_cli.discretize_clip_val}")
     else:
         print("[INFO]: Action discretization DISABLED (continuous)")
-    print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+    
     # load previously trained model
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DiversityRunner":
-        runner = DiversityRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    # play only needs the actor for inference, so we skip loading the critic and its
-    # obs normalizer. this allows replaying checkpoints whose critic obs space differs
-    # from the current env (e.g. legacy/privileged critics with extra terms).
-    loaded_dict = torch.load(resume_path, weights_only=False, map_location=agent_cfg.device)
-    actor_only_state_dict = {
-        k: v
-        for k, v in loaded_dict["model_state_dict"].items()
-        if not (k.startswith("critic.") or k.startswith("critic_obs_normalizer."))
-    }
-    skipped_keys = sorted(set(loaded_dict["model_state_dict"]) - set(actor_only_state_dict))
-    if skipped_keys:
-        print(f"[INFO]: Skipping critic params from checkpoint: {len(skipped_keys)} keys")
-    runner.alg.policy.load_state_dict(actor_only_state_dict, strict=False)
-    if "iter" in loaded_dict:
-        runner.current_learning_iteration = loaded_dict["iter"]
-
-    # If this is a Diversity run, also load the discriminator weights from the same
-    # checkpoint and re-publish on the env so the diversity reward term works.
-    if isinstance(runner, DiversityRunner) and "discriminator_state_dict" in loaded_dict:
-        runner.alg.discriminator.load_state_dict(loaded_dict["discriminator_state_dict"])
-        runner.alg.attach_env(env)
-
-    # obtain the trained policy for inference
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
-
-    # extract the neural network module
-    # we do this in a try-except to maintain backwards compatibility.
-    try:
-        # version 2.3 onwards
-        policy_nn = runner.alg.policy
-    except AttributeError:
-        # version 2.2 and below
-        policy_nn = runner.alg.actor_critic
-
-    # extract the normalizer
-    if hasattr(policy_nn, "actor_obs_normalizer"):
-        normalizer = policy_nn.actor_obs_normalizer
-    elif hasattr(policy_nn, "student_obs_normalizer"):
-        normalizer = policy_nn.student_obs_normalizer
-    else:
-        normalizer = None
-
+    print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+    assert not args_cli.non_deterministic or args_cli.jit_policy, "Cannot use non-deterministic policy without a JIT policy."
     privileged_debugger = None
-    if args_cli.plot_privileged_debug:
-        if (args_cli.privileged_debug_sweep_min is None) != (args_cli.privileged_debug_sweep_max is None):
-            raise ValueError(
-                "Set both --privileged_debug_sweep_min and --privileged_debug_sweep_max, or leave both unset."
-            )
-        sweep_range = None
-        if args_cli.privileged_debug_sweep_min is not None and args_cli.privileged_debug_sweep_max is not None:
-            sweep_range = (args_cli.privileged_debug_sweep_min, args_cli.privileged_debug_sweep_max)
-        privileged_debugger = PrivilegedPolicyDebugger(
-            policy_nn,
-            Path(log_dir) / "privileged_debug",
-            sweep_key=args_cli.privileged_debug_sweep_key,
-            sweep_range=sweep_range,
-            num_sweep_points=args_cli.privileged_debug_num_points,
-            include_joint_insertive_receptive=args_cli.privileged_debug_joint_insertive_receptive,
-        )
+    if args_cli.jit_policy:
+        policy = torch.jit.load(args_cli.checkpoint).to(env.unwrapped.device)
+        policy.eval()
+    else:
+        if agent_cfg.class_name == "OnPolicyRunner":
+            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        elif agent_cfg.class_name == "DistillationRunner":
+            runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        elif agent_cfg.class_name == "DiversityRunner":
+            runner = DiversityRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        else:
+            raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+        # play only needs the actor for inference, so we skip loading the critic and its
+        # obs normalizer. this allows replaying checkpoints whose critic obs space differs
+        # from the current env (e.g. legacy/privileged critics with extra terms).
+        loaded_dict = torch.load(resume_path, weights_only=False, map_location=agent_cfg.device)
+        actor_only_state_dict = {
+            k: v
+            for k, v in loaded_dict["model_state_dict"].items()
+            if not (k.startswith("critic.") or k.startswith("critic_obs_normalizer."))
+        }
+        skipped_keys = sorted(set(loaded_dict["model_state_dict"]) - set(actor_only_state_dict))
+        if skipped_keys:
+            print(f"[INFO]: Skipping critic params from checkpoint: {len(skipped_keys)} keys")
+        runner.alg.policy.load_state_dict(actor_only_state_dict, strict=False)
+        if "iter" in loaded_dict:
+            runner.current_learning_iteration = loaded_dict["iter"]
 
-    # export policy to onnx/jit
-    export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
-    export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+        # If this is a Diversity run, also load the discriminator weights from the same
+        # checkpoint and re-publish on the env so the diversity reward term works.
+        if isinstance(runner, DiversityRunner) and "discriminator_state_dict" in loaded_dict:
+            runner.alg.discriminator.load_state_dict(loaded_dict["discriminator_state_dict"])
+            runner.alg.attach_env(env)
+
+        # obtain the trained policy for inference
+        policy = runner.get_inference_policy(device=env.unwrapped.device)
+    
+        # extract the neural network module
+        # we do this in a try-except to maintain backwards compatibility.
+        try:
+            # version 2.3 onwards
+            policy_nn = runner.alg.policy
+        except AttributeError:
+            # version 2.2 and below
+            policy_nn = runner.alg.actor_critic
+
+        # extract the normalizer
+        if hasattr(policy_nn, "actor_obs_normalizer"):
+            normalizer = policy_nn.actor_obs_normalizer
+        elif hasattr(policy_nn, "student_obs_normalizer"):
+            normalizer = policy_nn.student_obs_normalizer
+        else:
+            normalizer = None
+
+        if args_cli.plot_privileged_debug:
+            if (args_cli.privileged_debug_sweep_min is None) != (args_cli.privileged_debug_sweep_max is None):
+                raise ValueError(
+                    "Set both --privileged_debug_sweep_min and --privileged_debug_sweep_max, or leave both unset."
+                )
+            sweep_range = None
+            if args_cli.privileged_debug_sweep_min is not None and args_cli.privileged_debug_sweep_max is not None:
+                sweep_range = (args_cli.privileged_debug_sweep_min, args_cli.privileged_debug_sweep_max)
+            privileged_debugger = PrivilegedPolicyDebugger(
+                policy_nn,
+                Path(log_dir) / "privileged_debug",
+                sweep_key=args_cli.privileged_debug_sweep_key,
+                sweep_range=sweep_range,
+                num_sweep_points=args_cli.privileged_debug_num_points,
+                include_joint_insertive_receptive=args_cli.privileged_debug_joint_insertive_receptive,
+            )
+
+        # export policy to onnx/jit
+        export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+        export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
+        export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
 
@@ -434,8 +465,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 rollout_data["policy_obs"].append(_to_cpu_detached(obs))
             if privileged_debugger is not None:
                 privileged_debugger.plot_step(obs, timestep)
+            
             # agent stepping
-            actions = policy(obs)
+            if args_cli.jit_policy:
+                mean, std = policy.compute_distribution(_flatten_policy_obs(obs))
+                actions = mean if not args_cli.non_deterministic else torch.normal(mean, std)
+            else:
+                actions = policy(obs)
             if rollout_data is not None:
                 rollout_data["actions"].append(_to_cpu_detached(actions))
             # rescale actions, this solves for action scale + offset changes.
@@ -456,7 +492,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 num_episodes += dones.sum().item()
                 num_successes += torch.logical_and(rewards > 0.1, dones).sum().item()
             # reset recurrent states for episodes that have terminated
-            policy_nn.reset(dones)
+            if not args_cli.jit_policy:
+                policy_nn.reset(dones)
         
         timestep += 1
         progress_bar.update(1)

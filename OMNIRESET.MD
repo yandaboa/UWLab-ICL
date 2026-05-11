@@ -23,5 +23,20 @@ python scripts/reinforcement_learning/rsl_rl/play.py \
     --num_envs 1 \
     --checkpoint peg_state_rl_expert_finetuned_seed42.pt \
     env.scene.insertive_object=peg \
-    env.scene.receptive_object=peghole
+    env.scene.receptive_object=peghole --headless
+```
+
+Data collection
+
+```
+python scripts_v2/tools/collect_demos.py \
+    --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-RGB-DataCollection-v0 \
+    --dataset_file /gscratch/scrubbed/yanda/omnireset/peg/rgb_seed10/rgb0.zarr \
+    --num_envs 64 \
+    --num_demos 40000 \
+    --enable_cameras \
+    --headless \
+    env.scene.insertive_object=peg \
+    env.scene.receptive_object=peghole \
+    agent.algorithm.offline_algorithm_cfg.behavior_cloning_cfg.experts_path='["logs/policies/seed10/exported/policy.pt"]'
 ```
