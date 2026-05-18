@@ -36,6 +36,21 @@ All `python` commands below assume this environment is active.
   Plot output paths (`plots/`) are gitignored.
 - **`logs/`, `plots/`, `*.pt` checkpoints, datasets, and rollouts are gitignored** — never commit them.
 
+## Research-track logs
+
+Long-running experiments keep a per-research-direction markdown log at the
+repo root that records the design, launch templates, gotchas, active runs,
+and experiment history. **One file per research direction**, not per
+experiment — append new runs and status entries to the existing file.
+
+When you join a session, **read the relevant log before touching anything**
+— it captures the *why* behind the current run configuration and the
+gotchas you'd otherwise re-hit.
+
+| File | Covers |
+|---|---|
+| `DIVERSITY.md` | All DIAYN-style diversity experiments (skill conditioning + discriminator reward). Includes implementation reference, launch templates, knobs, gotchas, active runs, and run history. |
+
 ## Key Commands
 
 ### RL Training (RSL-RL)

@@ -42,7 +42,7 @@ def custom_last_action(env: ManagerBasedEnv, action_name: str | None = None) -> 
 class BasePolicyCfg(ObsGroup):
     """Base policy observations for the UR5e + Robotiq 2F-85 robot."""
 
-    prev_actions = ObsTerm(func=custom_last_action)
+    # prev_actions = ObsTerm(func=custom_last_action)
 
     joint_pos = ObsTerm(func=task_mdp.joint_pos)
 
@@ -674,8 +674,8 @@ class Ur5eRobotiq2f85RelCartesianOSCPrivilegedTrainCfg(Ur5eRobotiq2f85RelCartesi
     def __post_init__(self):
         super().__post_init__()
 
-        self.observations.policy = ObservationsCfg.PolicyCfg()
-        # self.observations.policy = BasePolicyCfg()
+        # self.observations.policy = ObservationsCfg.PolicyCfg()
+        self.observations.policy = BasePolicyCfg()
         # self.observations.policy = PrivilegedPolicyCfg()
         self.observations.critic = PrivilegedCriticCfg()
         self.scene.robot = EXPLICIT_UR5E_ROBOTIQ_2F85.replace(prim_path="{ENV_REGEX_NS}/Robot")

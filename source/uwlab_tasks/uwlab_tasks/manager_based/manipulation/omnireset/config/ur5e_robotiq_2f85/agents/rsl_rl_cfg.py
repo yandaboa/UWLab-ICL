@@ -27,7 +27,7 @@ def my_experts_observation_func(env):
 
 @configclass
 class Base_PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 16 # use 32 if on 4 GPUs, 16 is fine otherwise
+    num_steps_per_env = 32 # use 32 if on 4 GPUs, 16 is fine otherwise
     max_iterations = 40000
     save_interval = 100
     resume = False
@@ -36,14 +36,14 @@ class Base_PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         init_noise_std=1.0,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
-        # actor_hidden_dims=[512, 256, 128, 64],
-        actor_hidden_dims=[1024, 512, 256, 128],
+        actor_hidden_dims=[512, 256, 128, 64],
+        # actor_hidden_dims=[1024, 512, 256, 128],
         # actor_hidden_dims=[1024, 512, 512, 256, 128],
         privileged_obs_encoder_dims=[256, 128, 64],
         use_privileged_obs_encoder=False,
         film_hiddens=[512, 512],
-        # critic_hidden_dims=[512, 256, 128, 64],
-        critic_hidden_dims=[1024, 512, 256, 128],
+        critic_hidden_dims=[512, 256, 128, 64],
+        # critic_hidden_dims=[1024, 512, 256, 128],
         # critic_hidden_dims=[1024, 512, 512, 256, 128],
         activation="elu",
         noise_std_type="gsde",
@@ -106,7 +106,7 @@ class Diversity_PPORunnerCfg(Base_PPORunnerCfg):
     The number of skills here must match ``NUM_SKILLS`` in ``rl_state_cfg.py`` (the env-side
     skill obs term reads its own copy of the alphabet size from its params).
     """
-
+    num_steps_per_env = 16
     class_name: str = "DiversityRunner"
     experiment_name = "ur5e_robotiq_2f85_omnireset_diversity"
     algorithm = RslRlDiversityPpoAlgorithmCfg(
