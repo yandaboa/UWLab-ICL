@@ -609,12 +609,12 @@ class FinetuneCurriculumsCfg:
         params={
             "event_term_names": ["randomize_arm_sysid", "randomize_osc_gains"],
             "reset_event_name": "reset_from_reset_states",
-            "success_threshold_up": 0.95,
-            "success_threshold_down": 0.9,
+            "success_threshold_up": 0.90,
+            "success_threshold_down": 0.80,
             "delta": 0.01,
             "update_every_n_steps": 200,
             "initial_scale_progress": 0.0,
-            "warmup_success_threshold": 0.95,
+            "warmup_success_threshold": 0.80,
         },
     )
 
@@ -625,8 +625,8 @@ class FinetuneCurriculumsCfg:
             "reset_event_name": "reset_from_reset_states",
             "initial_scales": [0.02, 0.02, 0.02, 0.02, 0.02, 0.2],
             "target_scales": [0.01, 0.01, 0.002, 0.02, 0.02, 0.2],
-            "success_threshold_up": 0.95,
-            "success_threshold_down": 0.9,
+            "success_threshold_up": 0.90,
+            "success_threshold_down": 0.80,
             "delta": 0.01,
             "update_every_n_steps": 200,
             "initial_progress": 0.0,
@@ -763,7 +763,8 @@ class Ur5eRobotiq2f85RelCartesianOSCFinetuneCfg(Ur5eRobotiq2f85RlStateCfg):
     """Finetune config: loads converged Stage 1 policy, explicit actuator from start, curriculum ramps DR."""
 
     events: FinetuneEventCfg = FinetuneEventCfg()
-    actions: Ur5eRobotiq2f85RelativeOSCAction = Ur5eRobotiq2f85RelativeOSCAction()
+    # actions: Ur5eRobotiq2f85RelativeOSCAction = Ur5eRobotiq2f85RelativeOSCAction()
+    actions: Ur5eRobotiq2f85RelativeOSCPositionAction = Ur5eRobotiq2f85RelativeOSCPositionAction()
     curriculum: FinetuneCurriculumsCfg = FinetuneCurriculumsCfg()
 
     def __post_init__(self):

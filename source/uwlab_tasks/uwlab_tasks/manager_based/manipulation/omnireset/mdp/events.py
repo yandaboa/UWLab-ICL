@@ -1936,7 +1936,7 @@ class action_scale_curriculum(ManagerTermBase):
         target = torch.tensor(target_scales, device=env.device, dtype=torch.float32)
         effective = initial + self._progress * (target - initial)
 
-        self._action_term._scale = effective
+        self._action_term._scale[:] = effective
 
         self._last_state = {
             "scale_progress": self._progress,
