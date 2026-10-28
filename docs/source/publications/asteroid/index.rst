@@ -152,6 +152,9 @@ dynamics and gains:
 Useful flags:
 
 - ``--dry_run`` prints the stage commands without launching Isaac Sim.
+- On a multi-GPU machine the simulator uses ``--device`` and the student runs on every other
+  GPU, one replica per GPU over a block of environments (``--student_devices`` in
+  ``collect_demos_asteroid.py`` / ``eval_asteroid_policy.py`` overrides this).
 - ``--schedule`` selects a curriculum from ``CURRICULA`` in ``run_asteroid.py``.
 - ``--start_iteration N --checkpoint_dir <run dir>`` resumes an interrupted run.
 - ``--initial_dataset_path`` reuses an existing iteration-0 dataset.

@@ -34,6 +34,15 @@ parser.add_argument("--wandb_project", type=str, default="asteroid", help="WandB
 parser.add_argument("--wandb_group", type=str, default=None, help="WandB group name for logging.")
 parser.add_argument("--iteration", type=int, default=0, help="Iteration number for logging.")
 # append AppLauncher cli args
+parser.add_argument(
+    "--student_devices",
+    type=str,
+    default=None,
+    help=(
+        "Comma-separated devices for student inference (e.g. cuda:1,cuda:2). Default: every visible GPU"
+        " except the simulation device, falling back to the simulation device."
+    ),
+)
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, remaining_args = parser.parse_known_args()
@@ -51,19 +60,10 @@ import torch
 from contextlib import nullcontext
 from tqdm import tqdm
 
-import dill
-import hydra
 import isaaclab_tasks  # noqa: F401
 import wandb
 from isaaclab.envs import DirectRLEnvCfg, ManagerBasedRLEnvCfg
-
-from diffusion_policy.policy.base_image_policy import BaseImagePolicy
-
-# Diffusion policy imports
-from diffusion_policy.workspace.base_workspace import BaseWorkspace
-
-# Import the Diffusion policy wrapper
-from uwlab_rl.wrappers.diffusion import DiffusionPolicyWrapper
+from student_policy import MultiDeviceStudent, resolve_student_devices
 
 import uwlab_tasks  # noqa: F401
 from uwlab_tasks.utils.hydra import hydra_task_compose
@@ -80,15 +80,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # Check device is available
-    device = torch.device("cuda:0")
-    policy_device = torch.device("cuda:1") if torch.cuda.device_count() > 1 else device
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
     # Override configurations with CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    # simulation and action buffers share the sim device; the student may use other GPUs
+    device = torch.device(env_cfg.sim.device)
     env_cfg.sim.use_fabric = not args_cli.disable_fabric
     # Set environment seed
     env_cfg.seed = args_cli.seed
@@ -116,30 +115,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
         },
     )
 
-    # Load diffusion policy checkpoint
-    ckpt_path = args_cli.checkpoint
-    payload = torch.load(open(ckpt_path, "rb"), pickle_module=dill)
-    cfg = payload["cfg"]
-    cls = hydra.utils.get_class(cfg._target_)
-    workspace = cls(cfg)
-    workspace: BaseWorkspace
-    workspace.load_payload(payload, exclude_keys=None, include_keys=None)
-
-    # Load policy based on configuration
-    policy: BaseImagePolicy
-    policy = workspace.model
-    if cfg.training.use_ema:
-        policy = workspace.ema_model
-
-    # print policy summary
-    print(policy)
-
-    policy.eval().to(policy_device)
-
-    # Wrap policy to handle Isaac Lab observations
-    wrapped_policy = DiffusionPolicyWrapper(
-        policy, policy_device, n_obs_steps=policy.n_obs_steps, num_envs=args_cli.num_envs
+    # Load the student, replicated across the student devices
+    student_devices = resolve_student_devices(device, args_cli.student_devices)
+    print(f"[eval] Student inference devices: {[str(d) for d in student_devices]}")
+    wrapped_policy = MultiDeviceStudent.from_checkpoint(
+        args_cli.checkpoint, student_devices, args_cli.num_envs, output_device=device, use_amp=args_cli.use_amp
     )
+    print(wrapped_policy.shards[0].policy)
 
     # reset environment
     obs_dict, _ = env.reset()

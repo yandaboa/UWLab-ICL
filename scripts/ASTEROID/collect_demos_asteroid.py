@@ -53,6 +53,15 @@ parser.add_argument(
     help="Force env.reset() when no new demo has been recorded for this many seconds. 0 disables.",
 )
 parser.add_argument(
+    "--student_devices",
+    type=str,
+    default=None,
+    help=(
+        "Comma-separated devices for student inference (e.g. cuda:1,cuda:2). Default: every visible GPU"
+        " except the simulation device, falling back to the simulation device."
+    ),
+)
+parser.add_argument(
     "--debug",
     action="store_true",
     default=False,
@@ -87,8 +96,6 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
-import dill
-import hydra
 import isaaclab_tasks  # noqa: F401
 from isaaclab.envs import DirectRLEnvCfg, ManagerBasedRLEnvCfg
 from isaaclab.managers.recorder_manager import DatasetExportMode
@@ -96,14 +103,9 @@ from isaaclab.managers.recorder_manager import DatasetExportMode
 # Import dataset handlers
 from isaaclab.utils.datasets import HDF5DatasetFileHandler
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper
+from student_policy import MultiDeviceStudent, resolve_student_devices
 
-from diffusion_policy.policy.base_image_policy import BaseImagePolicy
-
-# Diffusion policy imports
-from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from uwlab.utils.datasets import ZarrDatasetFileHandler
-
-from uwlab_rl.wrappers.diffusion import DiffusionPolicyWrapper
 
 import uwlab_tasks  # noqa: F401
 from uwlab_tasks.manager_based.manipulation.asteroid.mdp.recorders.recorders_cfg import (
@@ -192,26 +194,6 @@ def process_agent_cfg(env_cfg, agent_cfg):
                     cfg = cfg_cls()
                     setattr(env_cfg.observations, "expert_obs", cfg)
     return agent_cfg
-
-
-def load_exploration_policy(checkpoint_path: str, device: torch.device, num_envs: int):
-    """Load exploration diffusion policy from checkpoint."""
-    payload = torch.load(open(checkpoint_path, "rb"), pickle_module=dill)
-    cfg = payload["cfg"]
-    cls = hydra.utils.get_class(cfg._target_)
-    workspace = cls(cfg)
-    workspace: BaseWorkspace
-    workspace.load_payload(payload, exclude_keys=None, include_keys=None)
-
-    policy: BaseImagePolicy
-    policy = workspace.model
-    if cfg.training.use_ema:
-        policy = workspace.ema_model
-
-    policy.eval().to(device)
-
-    wrapped_policy = DiffusionPolicyWrapper(policy, device, n_obs_steps=policy.n_obs_steps, num_envs=num_envs)
-    return wrapped_policy
 
 
 def sample_exploration_horizons(
@@ -372,8 +354,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
     np.random.seed(args_cli.seed)
     torch.manual_seed(args_cli.seed)
     # device = torch.device(args_cli.device if args_cli.device else 'cuda' if torch.cuda.is_available() else 'cpu')
-    device = torch.device("cuda:0")
-    policy_device = torch.device("cuda:1") if torch.cuda.device_count() > 1 else device
 
     # get directory path and file name (without extension) from cli arguments
     output_dir = os.path.dirname(args_cli.dataset_file)
@@ -399,6 +379,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    # simulation, expert and action buffers share the sim device; the student may use other GPUs
+    device = torch.device(env_cfg.sim.device)
     env_cfg.seed = args_cli.seed
     # we want to have the terms in the observations returned as a dictionary
     env_cfg.observations.policy.concatenate_terms = False
@@ -446,7 +428,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
     # load exploration policy
     exploration_policy = None
     if args_cli.exploration_checkpoint:
-        exploration_policy = load_exploration_policy(args_cli.exploration_checkpoint, policy_device, num_envs)
+        student_devices = resolve_student_devices(device, args_cli.student_devices)
+        print(f"[collect] Student inference devices: {[str(d) for d in student_devices]}")
+        exploration_policy = MultiDeviceStudent.from_checkpoint(
+            args_cli.exploration_checkpoint, student_devices, num_envs, output_device=device
+        )
 
     # load expert policy
     bc = agent_cfg.algorithm.offline_algorithm_cfg.behavior_cloning_cfg
