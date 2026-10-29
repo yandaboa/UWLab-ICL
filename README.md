@@ -13,50 +13,38 @@
 > [!NOTE]
 > **This is the `asteroid` branch.** It adds ASTEROID on top of UW Lab temporarily, based on the
 > Isaac Sim 5.1 / Isaac Lab 2.x version of UW Lab. ASTEROID will be merged back into `main` after it
-> is upgraded to Isaac Lab 3.0. Start with the [ASTEROID](#asteroid) section below.
-
-## Overview
-
-UW Lab builds upon the robust foundation established by Isaac Lab and NVIDIA Isaac Sim, expanding its framework to integrate a wider range of robotics algorithms, platforms, and environments. Rooted in principles of modularity, agility, openness, and a battery-included design inspired from IsaacLab, our framework is crafted to meet the evolving demands of modern robotics research.
-
-In the short term, our mission is to consolidate and streamline robotics research into one cohesive ecosystem, empowering researchers and developers with a unified platform. Looking ahead, UW Lab envisions a future where artificial intelligence and robotics coalesce seamlessly with physical systems—bridging the gap between simulation and real-world application. By embedding the laws of physics at its core, our framework provides a realistic, adaptable platform for developing next-generation robotic systems.
-
-At UW Lab, we believe that the development journey is as significant as the outcome. Our commitment to creating principled, flexible, and extensible structures supports an environment where innovation thrives and every experiment contributes to advancing the field of robotics. Join us as we push the boundaries of what's possible, transforming ideas into tangible, intelligent robotic solutions.
-
-
-## Key Features
-
-In addition to what IsaacLab provides, UW Lab brings:
-
-- **Environments**: Cleaned Implementation of reputable environments in Manager-Based format
-- **Sim to Real**: Providing robots and configuration that has been tested in Lab and deliver the Simulation Setup that can directly transfer to reals
-
-
-## Installation
-
-Follow the [installation guide](https://uw-lab.github.io/UWLab/main/source/setup/installation/index.html).
-
-
-## Getting Started
-
-- **Train Your First Policy** — Train an ant to run in minutes → [Quickstart](https://uw-lab.github.io/UWLab/main/source/setup/installation/pip_installation.html#train-a-robot)
-- **OmniReset** — RL for manipulation without reward engineering or demos → [Quickstart](https://uw-lab.github.io/UWLab/main/source/publications/omnireset/index.html#quick-start)
-- **ASTEROID** — Iterative in-context exploration + distillation for cube pick-up → [Quickstart](#asteroid) (this branch)
-
-See [all available environments](https://uw-lab.github.io/UWLab/main/source/overview/uw_environments.html) and [full documentation](https://uw-lab.github.io/UWLab) for details.
-
+> is upgraded to Isaac Lab 3.0. The UW Lab README follows the ASTEROID section.
 
 ## ASTEROID
 
-ASTEROID trains a proprioceptive student policy for cube pick-up by alternating
-**in-context exploration** and **distillation**. A state-based RL expert, trained with the
-OmniReset recipe, supervises a diffusion-policy student. From the second iteration on, the
-previous student acts as an *explorer* for the first part of each data-collection episode
-before the expert takes over. Each iteration runs three stages:
+**Asymmetric On-Policy Distillation Learns In-Context Exploration**<br>
+Sriyash Poddar, Yanda Bao, Jacob Krantz, Matthew Chang, Xavier Puig, Roozbeh Mottaghi, Natasha Jaques, Abhishek Gupta
 
-1. **collect**: roll out the expert (plus the previous student as explorer) and record
-   proprioceptive observations, actions and a per-step expert mask.
-2. **train**: fit a diffusion-policy student on every dataset collected so far.
+[Project page](https://weirdlabuw.github.io/asteroid/) ·
+[Paper](https://weirdlabuw.github.io/asteroid/Incontext_Exploration___NeurIPS2026__arxiv_.pdf) ·
+[Official codebase](https://github.com/WEIRDLabUW/asteroid)
+
+Experts don't explore, so imitating them can't teach exploration. In a partially observed
+task, a privileged expert already knows the answer, while a student that can't see it has to
+probe, remember what failed and try again. ASTEROID lets the student explore on-policy and
+asks the expert one question: *given what this student has experienced so far, what would you
+do?* Each iteration, the student acts for a random number of steps to build up its own
+context, the expert takes over from wherever the student ended up to label actions, and the
+student is trained to map its history and current observation to the expert's action. The
+same history can call for different actions in different worlds, so the student learns a
+distribution over expert actions, and the hand-off points move later over iterations, giving
+a natural curriculum over context length.
+
+This branch contains the **tactile cube pick-up** experiments: a UR5e + Robotiq 2F-85 student
+that sees only proprioception (arm joints, end-effector pose, gripper width, last actions; no
+camera) learns to probe, feel for contact and retry after a missed grasp. The privileged
+expert is a state-based RL policy trained with the OmniReset recipe; the student is a
+diffusion-policy transformer over its own trajectory. `scripts/ASTEROID/run_asteroid.py` runs
+the loop, and each iteration has three stages:
+
+1. **collect**: the previous student explores for a random fraction of each episode, then the
+   expert takes over; observations, actions and a per-step expert mask are recorded.
+2. **train**: fit the student on every dataset collected so far.
 3. **eval**: roll out the student.
 
 Code lives in [`scripts/ASTEROID`](scripts/ASTEROID) and
@@ -138,6 +126,37 @@ checkpoints for every iteration. Useful options:
   it with `--schedule`.
 - On a multi-GPU machine the simulator uses `--device` and the student runs on the other
   GPUs.
+
+
+## Overview
+
+UW Lab builds upon the robust foundation established by Isaac Lab and NVIDIA Isaac Sim, expanding its framework to integrate a wider range of robotics algorithms, platforms, and environments. Rooted in principles of modularity, agility, openness, and a battery-included design inspired from IsaacLab, our framework is crafted to meet the evolving demands of modern robotics research.
+
+In the short term, our mission is to consolidate and streamline robotics research into one cohesive ecosystem, empowering researchers and developers with a unified platform. Looking ahead, UW Lab envisions a future where artificial intelligence and robotics coalesce seamlessly with physical systems—bridging the gap between simulation and real-world application. By embedding the laws of physics at its core, our framework provides a realistic, adaptable platform for developing next-generation robotic systems.
+
+At UW Lab, we believe that the development journey is as significant as the outcome. Our commitment to creating principled, flexible, and extensible structures supports an environment where innovation thrives and every experiment contributes to advancing the field of robotics. Join us as we push the boundaries of what's possible, transforming ideas into tangible, intelligent robotic solutions.
+
+
+## Key Features
+
+In addition to what IsaacLab provides, UW Lab brings:
+
+- **Environments**: Cleaned Implementation of reputable environments in Manager-Based format
+- **Sim to Real**: Providing robots and configuration that has been tested in Lab and deliver the Simulation Setup that can directly transfer to reals
+
+
+## Installation
+
+Follow the [installation guide](https://uw-lab.github.io/UWLab/main/source/setup/installation/index.html).
+
+
+## Getting Started
+
+- **Train Your First Policy** — Train an ant to run in minutes → [Quickstart](https://uw-lab.github.io/UWLab/main/source/setup/installation/pip_installation.html#train-a-robot)
+- **OmniReset** — RL for manipulation without reward engineering or demos → [Quickstart](https://uw-lab.github.io/UWLab/main/source/publications/omnireset/index.html#quick-start)
+- **ASTEROID** — Asymmetric on-policy distillation that learns in-context exploration → [Quickstart](#quick-start) (this branch)
+
+See [all available environments](https://uw-lab.github.io/UWLab/main/source/overview/uw_environments.html) and [full documentation](https://uw-lab.github.io/UWLab) for details.
 
 
 ## Support
