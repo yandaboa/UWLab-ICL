@@ -27,30 +27,21 @@ Sriyash Poddar, Yanda Bao, Jacob Krantz, Matthew Chang, Xavier Puig, Roozbeh Mot
 Experts don't explore, so imitating them can't teach exploration. In a partially observed
 task, a privileged expert already knows the answer, while a student that can't see it has to
 probe, remember what failed and try again. ASTEROID lets the student explore on-policy and
-asks the expert one question: *given what this student has experienced so far, what would you
-do?* Each iteration, the student acts for a random number of steps to build up its own
-context, the expert takes over from wherever the student ended up to label actions, and the
-student is trained to map its history and current observation to the expert's action. The
-same history can call for different actions in different worlds, so the student learns a
-distribution over expert actions, and the hand-off points move later over iterations, giving
-a natural curriculum over context length.
+eventually asks the expert for guidance. This teaches the student a distribution over expert actions, and over multiple iterations, active retrying and exploring.
 
 This branch contains the **tactile cube pick-up** experiments: a UR5e + Robotiq 2F-85 student
 that sees only proprioception (arm joints, end-effector pose, gripper width, last actions; no
-camera) learns to probe, feel for contact and retry after a missed grasp. The privileged
+camera). Using ASTEROID, the student policy learns to probe, feel for contact, and retry after a missed grasp. The privileged
 expert is a state-based RL policy trained with the OmniReset recipe; the student is a
-diffusion-policy transformer over its own trajectory. `scripts/ASTEROID/run_asteroid.py` runs
-the loop, and each iteration has three stages:
+diffusion-policy transformer. Look to `scripts/ASTEROID/run_asteroid.py` for the entry point. At each iteration, ASTEROID:
 
-1. **collect**: the previous student explores for a random fraction of each episode, then the
+1. **collects**: the previous student explores for a random fraction of each episode, then the
    expert takes over; observations, actions and a per-step expert mask are recorded.
-2. **train**: fit the student on every dataset collected so far.
-3. **eval**: roll out the student.
+2. **trains**: fit the student on every dataset collected so far.
+3. **evals**: roll out the student.
 
 Code lives in [`scripts/ASTEROID`](scripts/ASTEROID) and
 [`source/uwlab_tasks/.../manipulation/asteroid`](source/uwlab_tasks/uwlab_tasks/manager_based/manipulation/asteroid).
-The full guide, with every environment, the dataset layout and the package layout, is
-[`docs/source/publications/asteroid/index.rst`](docs/source/publications/asteroid/index.rst).
 
 ### Setup
 
